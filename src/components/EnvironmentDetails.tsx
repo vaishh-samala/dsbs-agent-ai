@@ -63,6 +63,24 @@ export const EnvironmentDetails: React.FC<EnvironmentDetailsProps> = ({
             </span>
           </div>
         );
+      case 'awaiting_approval':
+        return (
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-violet-950/60 border border-violet-500/40">
+            <span className="w-2 h-2 rounded-full bg-violet-400 animate-pulse"></span>
+            <span className="text-xs font-semibold text-violet-300">
+              Awaiting Approval
+            </span>
+          </div>
+        );
+      case 'rejected':
+        return (
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-rose-950/60 border border-rose-500/40">
+            <span className="w-2 h-2 rounded-full bg-rose-400"></span>
+            <span className="text-xs font-semibold text-rose-300">
+              Plan Rejected
+            </span>
+          </div>
+        );
       case 'failed':
         return (
           <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-rose-950/60 border border-rose-500/30">

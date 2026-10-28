@@ -21,20 +21,28 @@ class ExecutionPlanItem(TypedDict, total=False):
     description: str
     phase: str
     requires_runtime: bool
+    commands: Optional[List[str]]
 
 
 class SandboxAgentState(TypedDict, total=False):
     """Typed graph state for the Developer Sandbox LangGraph orchestration agent.
 
-    Tracks the entire lifecycle from manifest validation to planned execution,
-    verification, and final workflow summarization.
+    Tracks the entire lifecycle from manifest discovery/validation to planned execution,
+    isolated sandbox verification, and final workflow summarization.
     """
     workflow_id: str
     manifest: Dict[str, Any]
     validation_result: Dict[str, Any]
+    discovery_metadata: Dict[str, Any]
     execution_plan: List[Dict[str, Any]]
+    execution_logs: List[Dict[str, Any]]
     current_step: Optional[str]
     step_statuses: Dict[str, StepStatusRecord]
     errors: List[str]
     final_summary: Dict[str, Any]
-    status: str  # "queued", "running", "completed", "failed"
+    status: str  # "queued", "running", "awaiting_approval", "completed", "failed", "rejected"
+    approval_status: str  # "pending", "awaiting_approval", "approved", "rejected"
+    approved_at: Optional[str]
+    rejection_reason: Optional[str]
+    plan_fingerprint: str
+    approved_plan_fingerprint: Optional[str]

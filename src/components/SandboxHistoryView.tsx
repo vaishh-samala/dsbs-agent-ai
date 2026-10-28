@@ -64,6 +64,20 @@ export const SandboxHistoryView: React.FC<SandboxHistoryViewProps> = ({
             Running
           </span>
         );
+      case 'awaiting_approval':
+        return (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-violet-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse"></span>
+            Awaiting Approval
+          </span>
+        );
+      case 'rejected':
+        return (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-rose-400">
+            <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+            Rejected
+          </span>
+        );
       case 'success':
         return (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">

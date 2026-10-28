@@ -1,7 +1,7 @@
 """Comprehensive test suite for the LangGraph sandbox bootstrap agent."""
 
 import pytest
-from app.agent.graph import run_sandbox_agent, sandbox_agent
+from app.agent.graph import resume_sandbox_agent, run_sandbox_agent, sandbox_agent
 from app.agent.state import SandboxAgentState
 from app.services.workflow_service import workflow_service
 
@@ -44,31 +44,54 @@ def clean_workflow_store():
 
 
 def test_valid_manifest_successful_graph_run():
-    """Verify that a valid manifest executes through all 5 nodes to a completed state."""
-    state = run_sandbox_agent(VALID_PYTHON_MANIFEST, workflow_id="wf-agent-test-01")
+    """Verify that a valid manifest plans execution, halts at approval gate, and completes on approval."""
+    # Phase 1: Planning and Approval Gate
+    initial_state = run_sandbox_agent(VALID_PYTHON_MANIFEST, workflow_id="wf-agent-test-01")
 
-    # Workflow level assertions
-    assert state["workflow_id"] == "wf-agent-test-01"
-    assert state["status"] == "completed"
-    assert state["current_step"] == "finalize_workflow"
-    assert len(state["errors"]) == 0
+    assert initial_state["workflow_id"] == "wf-agent-test-01"
+    assert initial_state["status"] == "awaiting_approval"
+    assert initial_state["approval_status"] == "awaiting_approval"
+    assert initial_state["current_step"] in ["plan_setup", "approval_gate"]
+    assert initial_state["plan_fingerprint"] is not None
+    assert len(initial_state["plan_fingerprint"]) == 64
+    assert len(initial_state["execution_plan"]) == 2
 
-    # Validation result
-    val_res = state["validation_result"]
+    # Validation succeeded
+    val_res = initial_state["validation_result"]
     assert val_res["is_valid"] is True
     assert val_res["normalized_manifest"]["project_name"] == "agent-fastapi-service"
+
+    # Crucial security assertion: NO execution commands run before approval!
+    step_statuses = initial_state["step_statuses"]
+    assert step_statuses["validate_manifest"]["status"] == "completed"
+    assert step_statuses["prepare_environment"]["status"] == "pending"
+    assert step_statuses["resolve_dependencies"]["status"] == "pending"
+
+    # Phase 2: Resume with explicit approval
+    state = resume_sandbox_agent(
+        workflow_id="wf-agent-test-01",
+        approved=True,
+        plan_fingerprint=initial_state["plan_fingerprint"],
+    )
+
+    # Workflow level assertions after approval
+    assert state["workflow_id"] == "wf-agent-test-01"
+    assert state["status"] == "completed"
+    assert state["approval_status"] == "approved"
+    assert state["current_step"] == "finalize_workflow"
+    assert len(state["errors"]) == 0
 
     # Execution plan formulated in plan_setup
     assert len(state["execution_plan"]) == 2
     plan_names = [p["name"] for p in state["execution_plan"]]
     assert plan_names == ["prepare_environment", "resolve_dependencies"]
 
-    # All 4 pipeline steps tracked and completed
-    step_statuses = state["step_statuses"]
-    assert len(step_statuses) == 4
-    for step_name in ["validate_manifest", "prepare_environment", "resolve_dependencies", "run_health_checks"]:
-        assert step_name in step_statuses
-        step = step_statuses[step_name]
+    # All pipeline steps tracked and completed
+    resumed_step_statuses = state["step_statuses"]
+    assert len(resumed_step_statuses) == 5  # validate_manifest, approval_gate, prepare_environment, resolve_dependencies, run_health_checks
+    for step_name in ["validate_manifest", "approval_gate", "prepare_environment", "resolve_dependencies", "run_health_checks"]:
+        assert step_name in resumed_step_statuses
+        step = resumed_step_statuses[step_name]
         assert step["status"] == "completed"
         assert step["started_at"] is not None
         assert step["completed_at"] is not None
@@ -113,13 +136,17 @@ def test_invalid_manifest_stops_before_execution():
 
 
 def test_execution_failure_branch_halts_before_verification():
-    """Verify that an execution failure halts the workflow and skips verify_setup."""
+    """Verify that an execution failure halts the workflow after approval and skips verify_setup."""
     exec_fail_manifest = {
         **VALID_PYTHON_MANIFEST,
         "project_name": "sample-fail_exec-service",
     }
 
-    state = run_sandbox_agent(exec_fail_manifest, workflow_id="wf-agent-exec-fail-01")
+    initial_state = run_sandbox_agent(exec_fail_manifest, workflow_id="wf-agent-exec-fail-01")
+    assert initial_state["status"] == "awaiting_approval"
+
+    # Resume with approval to trigger simulated execution failure
+    state = resume_sandbox_agent("wf-agent-exec-fail-01", approved=True)
 
     # Validation succeeded
     assert state["validation_result"]["is_valid"] is True
@@ -142,13 +169,17 @@ def test_execution_failure_branch_halts_before_verification():
 
 
 def test_environment_allocation_failure_branch():
-    """Verify that environment allocation failure halts execution immediately."""
+    """Verify that environment allocation failure halts execution immediately after approval."""
     env_fail_manifest = {
         **VALID_PYTHON_MANIFEST,
         "project_name": "sample-fail_env-service",
     }
 
-    state = run_sandbox_agent(env_fail_manifest, workflow_id="wf-agent-env-fail-01")
+    initial_state = run_sandbox_agent(env_fail_manifest, workflow_id="wf-agent-env-fail-01")
+    assert initial_state["status"] == "awaiting_approval"
+
+    # Resume with approval to trigger simulated environment failure
+    state = resume_sandbox_agent("wf-agent-env-fail-01", approved=True)
 
     # Validation succeeded
     assert state["validation_result"]["is_valid"] is True
@@ -169,13 +200,16 @@ def test_environment_allocation_failure_branch():
 
 def test_final_state_includes_step_statuses_and_summary():
     """Verify that the final state contains comprehensive step statuses and safe summary."""
-    state = run_sandbox_agent(VALID_NODE_MANIFEST, workflow_id="wf-node-summary-01")
+    initial_state = run_sandbox_agent(VALID_NODE_MANIFEST, workflow_id="wf-node-summary-01")
+    assert initial_state["status"] == "awaiting_approval"
+
+    state = resume_sandbox_agent("wf-node-summary-01", approved=True)
 
     summary = state["final_summary"]
     assert summary["workflow_id"] == "wf-node-summary-01"
     assert summary["status"] == "completed"
-    assert summary["total_steps"] == 4
-    assert summary["completed_steps"] == 4
+    assert summary["total_steps"] == 5  # validate_manifest, approval_gate, prepare_environment, resolve_dependencies, run_health_checks
+    assert summary["completed_steps"] == 5
     assert summary["failed_steps"] == 0
     assert summary["skipped_steps"] == 0
     assert summary["error_details"] is None
@@ -192,23 +226,41 @@ def test_final_state_includes_step_statuses_and_summary():
 
 
 def test_workflow_service_langgraph_integration():
-    """Verify that WorkflowService properly invokes and retains LangGraph agent state."""
+    """Verify that WorkflowService properly pauses at approval gate and resumes on approval."""
     from app.schemas import SetupManifest
 
     manifest = SetupManifest(**VALID_PYTHON_MANIFEST)
     create_res = workflow_service.create_workflow(manifest)
 
-    # API create response contract
+    # API create response contract: pauses awaiting approval
     assert create_res.workflow_id.startswith("wf-")
-    assert create_res.status.value in ["queued", "running"]
+    assert create_res.status.value == "awaiting_approval"
+    assert create_res.approval_status.value == "awaiting_approval"
+    assert create_res.plan_fingerprint is not None
     assert len(create_res.steps) == 4
 
-    # Status response contract
+    # Status response contract before approval
     status_res = workflow_service.get_workflow(create_res.workflow_id)
     assert status_res is not None
     assert status_res.workflow_id == create_res.workflow_id
-    assert status_res.status.value == "completed"
-    assert len(status_res.steps) == 4
+    assert status_res.status.value == "awaiting_approval"
+    assert status_res.approval_status.value == "awaiting_approval"
+
+    # Plan response contract
+    plan_res = workflow_service.get_workflow_plan(create_res.workflow_id)
+    assert plan_res is not None
+    assert plan_res.workflow_id == create_res.workflow_id
+    assert plan_res.is_ready_for_approval is True
+    assert len(plan_res.execution_plan) == 2
+
+    # Resume with approval
+    resumed_res = workflow_service.approve_workflow(
+        workflow_id=create_res.workflow_id,
+        approved=True,
+        plan_fingerprint=create_res.plan_fingerprint,
+    )
+    assert resumed_res.status.value == "completed"
+    assert resumed_res.approval_status.value == "approved"
 
     # Raw LangGraph agent state is accessible
     raw_agent_state = workflow_service.get_agent_state(create_res.workflow_id)

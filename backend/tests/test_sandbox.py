@@ -122,15 +122,15 @@ def test_setup_returns_unique_workflow_id_and_initial_steps():
     assert "workflow_id" in data_1
     assert data_1["workflow_id"].startswith("wf-")
     assert data_1["is_simulated"] is True
-    assert data_1["status"] in ["queued", "running"]
+    assert data_1["status"] in ["queued", "running", "awaiting_approval"]
     assert len(data_1["steps"]) == 4
 
-    # Verify initial step states
+    # Verify initial step states (validation completed, subsequent steps pending approval)
     steps = data_1["steps"]
     assert steps[0]["name"] == "validate_manifest"
     assert steps[0]["status"] == "completed"
     assert steps[1]["name"] == "prepare_environment"
-    assert steps[1]["status"] == "running"
+    assert steps[1]["status"] in ["pending", "running"]
     assert steps[2]["name"] == "resolve_dependencies"
     assert steps[2]["status"] == "pending"
 
@@ -173,7 +173,7 @@ def test_workflow_status_can_be_retrieved():
 
     assert status_data["workflow_id"] == workflow_id
     assert status_data["is_simulated"] is True
-    assert status_data["status"] in ["queued", "running", "completed", "failed"]
+    assert status_data["status"] in ["queued", "running", "completed", "failed", "awaiting_approval"]
     assert len(status_data["steps"]) == 4
 
     # Verify step names and ordering

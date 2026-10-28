@@ -27,7 +27,15 @@ import { DetailedSandboxModal } from './components/DetailedSandboxModal';
 import { SandboxHistoryView } from './components/SandboxHistoryView';
 import { SettingsView } from './components/SettingsView';
 import { MockPreviewModal } from './components/MockPreviewModal';
-import { Github, RotateCcw, Terminal, CheckCircle2, AlertCircle } from 'lucide-react';
+import {
+  Github,
+  RotateCcw,
+  Terminal,
+  CheckCircle2,
+  AlertCircle,
+  ShieldCheck,
+  XCircle,
+} from 'lucide-react';
 
 function mapBackendStepToFrontend(
   backendStep: BackendWorkflowStep,
@@ -245,7 +253,10 @@ export default function App() {
         runtimeVersion: formData.runtimeVersion,
         packageManager: formData.packageManager,
         createdAt: 'Just now',
-        status: 'running',
+        status: initRes.status === 'awaiting_approval' ? 'awaiting_approval' : 'running',
+        approvalStatus: initRes.approval_status || (initRes.status === 'awaiting_approval' ? 'awaiting_approval' : undefined),
+        planFingerprint: initRes.plan_fingerprint || undefined,
+        proposedPlan: (initRes.execution_plan as any) || undefined,
         currentStepId: 'inspection',
         steps: initialSteps,
         logs: [
@@ -263,6 +274,17 @@ export default function App() {
             stepId: 'inspection',
             message: `Manifest validated and normalized by backend service. Project archetype: ${payload.project_type}.`,
           },
+          ...(initRes.status === 'awaiting_approval'
+            ? [
+                {
+                  id: `log-${Date.now()}-gate`,
+                  timestamp: nowTime,
+                  level: 'info' as const,
+                  stepId: 'inspection' as const,
+                  message: `Execution plan prepared (${initRes.execution_plan?.length || 0} steps). Paused at approval gate awaiting explicit user approval.`,
+                },
+              ]
+            : []),
         ],
         env: {
           detectedRuntime: formData.runtimeVersion,
@@ -297,7 +319,17 @@ export default function App() {
       setActiveSandboxId(newId);
       setActiveTab('overview');
 
-      // 2. Poll workflow status from FastAPI backend until completed or failed
+      // If workflow is awaiting approval, stop here and prompt user to approve
+      if (initRes.status === 'awaiting_approval') {
+        setIsBootstrapping(false);
+        setApiNotification({
+          type: 'info',
+          message: `Execution plan prepared (${initRes.execution_plan?.length || 0} steps). Review the commands below and approve to boot sandbox.`,
+        });
+        return;
+      }
+
+      // 2. Poll workflow status from FastAPI backend until terminal status
       const finalStatus = await sandboxApi.pollWorkflowStatus(newId, (prog) => {
         setSandboxes((prev) =>
           prev.map((s) => {
@@ -316,80 +348,7 @@ export default function App() {
       });
 
       // 3. Finalize sandbox state
-      const updatedSteps = mapBackendStepsToPipeline(finalStatus.steps, newSandbox.steps);
-      const isFailed = finalStatus.status === 'failed';
-
-      let errorSummary: ErrorSummary | undefined;
-      if (isFailed) {
-        const failedStep = finalStatus.steps.find((st) => st.status === 'failed');
-        errorSummary = {
-          title: 'Verification Health Check Failed',
-          message:
-            finalStatus.error_details ||
-            failedStep?.error_message ||
-            `Process started but failed readiness probes on port ${formData.port}.`,
-          step: 'verification',
-          exitCode: 1,
-          suggestedFix:
-            formData.runtime === 'python'
-              ? 'Add MOCK_DATABASE=true or use a local SQLite connection string in the Environment Variables section.'
-              : 'Verify port binding and check that all required environment variables are configured.',
-          stackTrace: failedStep?.error_message || 'Simulated health check failed.',
-        };
-      }
-
-      setSandboxes((prev) =>
-        prev.map((s) => {
-          if (s.id === newId) {
-            return {
-              ...s,
-              status: isFailed ? 'failed' : 'running',
-              steps: updatedSteps,
-              errorSummary,
-              healthStatus: isFailed
-                ? undefined
-                : {
-                    healthy: true,
-                    latencyMs: 24,
-                    statusCode: 200,
-                    checkedAt: 'Just now',
-                  },
-              previewUrl: isFailed ? undefined : `http://localhost:${formData.port}`,
-              logs: [
-                ...s.logs,
-                ...(isFailed
-                  ? [
-                      {
-                        id: `log-${Date.now()}-err`,
-                        timestamp: new Date().toTimeString().split(' ')[0],
-                        level: 'error' as const,
-                        stepId: 'verification' as const,
-                        message: finalStatus.error_details || 'Health probe failed.',
-                      },
-                    ]
-                  : [
-                      {
-                        id: `log-${Date.now()}-succ`,
-                        timestamp: new Date().toTimeString().split(' ')[0],
-                        level: 'success' as const,
-                        stepId: 'verification' as const,
-                        message: `FastAPI workflow ${newId} completed successfully! Sandbox ready at http://localhost:${formData.port}`,
-                      },
-                    ]),
-              ],
-            };
-          }
-          return s;
-        })
-      );
-
-      setApiNotification({
-        type: isFailed ? 'error' : 'success',
-        message: isFailed
-          ? `Backend workflow ${newId} finished with verification error.`
-          : `Backend workflow ${newId} bootstrapped successfully via FastAPI.`,
-      });
-      setTimeout(() => setApiNotification(null), 5000);
+      finalizeWorkflowResult(newId, finalStatus, newSandbox);
     } catch (err: unknown) {
       // Backend not running / connection failed: inform and run local simulator
       const errMsg = (err as Error)?.message || 'Network error';
@@ -432,6 +391,206 @@ export default function App() {
       setActiveTab('overview');
     } finally {
       setIsBootstrapping(false);
+    }
+  };
+
+  // Helper to finalize workflow status after completion/failure/rejection
+  const finalizeWorkflowResult = (
+    sandboxId: string,
+    finalStatus: {
+      status: string;
+      error_details?: string | null;
+      steps: BackendWorkflowStep[];
+      approval_status?: string | null;
+      rejection_reason?: string | null;
+    },
+    targetSandbox: Sandbox
+  ) => {
+    const updatedSteps = mapBackendStepsToPipeline(finalStatus.steps, targetSandbox.steps);
+    const isFailed = finalStatus.status === 'failed';
+    const isRejected = finalStatus.status === 'rejected';
+
+    let errorSummary: ErrorSummary | undefined;
+    if (isFailed) {
+      const failedStep = finalStatus.steps.find((st) => st.status === 'failed');
+      errorSummary = {
+        title: 'Verification Health Check Failed',
+        message:
+          finalStatus.error_details ||
+          failedStep?.error_message ||
+          `Process started but failed readiness probes on port ${targetSandbox.env.port}.`,
+        step: 'verification',
+        exitCode: 1,
+        suggestedFix:
+          targetSandbox.runtime === 'python'
+            ? 'Add MOCK_DATABASE=true or use a local SQLite connection string in the Environment Variables section.'
+            : 'Verify port binding and check that all required environment variables are configured.',
+        stackTrace: failedStep?.error_message || 'Simulated health check failed.',
+      };
+    }
+
+    setSandboxes((prev) =>
+      prev.map((s) => {
+        if (s.id === sandboxId) {
+          return {
+            ...s,
+            status: isFailed ? 'failed' : isRejected ? 'rejected' : 'running',
+            approvalStatus: (finalStatus.approval_status as any) || s.approvalStatus,
+            rejectionReason: finalStatus.rejection_reason || s.rejectionReason,
+            steps: updatedSteps,
+            errorSummary,
+            healthStatus:
+              isFailed || isRejected
+                ? undefined
+                : {
+                    healthy: true,
+                    latencyMs: 24,
+                    statusCode: 200,
+                    checkedAt: 'Just now',
+                  },
+            previewUrl: isFailed || isRejected ? undefined : `http://localhost:${targetSandbox.env.port}`,
+            logs: [
+              ...s.logs,
+              ...(isFailed
+                ? [
+                    {
+                      id: `log-${Date.now()}-err`,
+                      timestamp: new Date().toTimeString().split(' ')[0],
+                      level: 'error' as const,
+                      stepId: 'verification' as const,
+                      message: finalStatus.error_details || 'Health probe failed.',
+                    },
+                  ]
+                : isRejected
+                ? [
+                    {
+                      id: `log-${Date.now()}-rej`,
+                      timestamp: new Date().toTimeString().split(' ')[0],
+                      level: 'warn' as const,
+                      stepId: 'inspection' as const,
+                      message: `Workflow halted cleanly at approval gate: ${finalStatus.rejection_reason || 'Plan rejected.'}`,
+                    },
+                  ]
+                : [
+                    {
+                      id: `log-${Date.now()}-succ`,
+                      timestamp: new Date().toTimeString().split(' ')[0],
+                      level: 'success' as const,
+                      stepId: 'verification' as const,
+                      message: `FastAPI workflow ${sandboxId} completed successfully! Sandbox ready at http://localhost:${targetSandbox.env.port}`,
+                    },
+                  ]),
+            ],
+          };
+        }
+        return s;
+      })
+    );
+
+    setApiNotification({
+      type: isFailed ? 'error' : isRejected ? 'info' : 'success',
+      message: isFailed
+        ? `Backend workflow ${sandboxId} finished with verification error.`
+        : isRejected
+        ? `Backend workflow ${sandboxId} setup was cleanly rejected.`
+        : `Backend workflow ${sandboxId} bootstrapped successfully via FastAPI.`,
+    });
+    setTimeout(() => setApiNotification(null), 5000);
+  };
+
+  // Handle Explicit User Approval for Proposed Execution Plan
+  const handleApprovePlan = async (sandboxId: string) => {
+    const target = sandboxes.find((s) => s.id === sandboxId);
+    if (!target || !target.workflowId) return;
+
+    setIsBootstrapping(true);
+    try {
+      const apprRes = await sandboxApi.approveWorkflow(target.workflowId, {
+        approved: true,
+        plan_fingerprint: target.planFingerprint,
+      });
+
+      // Update sandbox state after resuming
+      setSandboxes((prev) =>
+        prev.map((s) => {
+          if (s.id === sandboxId) {
+            const updatedSteps = mapBackendStepsToPipeline(apprRes.steps, s.steps);
+            return {
+              ...s,
+              status: apprRes.status === 'completed' ? 'running' : (apprRes.status as SandboxStatus),
+              approvalStatus: 'approved',
+              steps: updatedSteps,
+              logs: [
+                ...s.logs,
+                {
+                  id: `log-${Date.now()}-appr`,
+                  timestamp: new Date().toTimeString().split(' ')[0],
+                  level: 'success' as const,
+                  stepId: 'dependencies' as const,
+                  message: `Execution plan explicitly approved. Resuming setup via sandbox executor.`,
+                },
+              ],
+            };
+          }
+          return s;
+        })
+      );
+
+      // If already finished in synchronous execution
+      if (apprRes.status === 'completed' || apprRes.status === 'failed') {
+        finalizeWorkflowResult(sandboxId, apprRes, target);
+        return;
+      }
+
+      // Poll until completed or failed
+      const finalStatus = await sandboxApi.pollWorkflowStatus(target.workflowId, (prog) => {
+        setSandboxes((prev) =>
+          prev.map((s) => {
+            if (s.id === sandboxId) {
+              const updatedSteps = mapBackendStepsToPipeline(prog.steps, s.steps);
+              return {
+                ...s,
+                steps: updatedSteps,
+                currentStepId:
+                  updatedSteps.find((st) => st.status === 'running')?.id || s.currentStepId,
+              };
+            }
+            return s;
+          })
+        );
+      });
+
+      finalizeWorkflowResult(sandboxId, finalStatus, target);
+    } catch (err: unknown) {
+      setApiNotification({
+        type: 'error',
+        message: `Approval failed: ${(err as Error)?.message || 'Unknown error'}`,
+      });
+      setTimeout(() => setApiNotification(null), 5000);
+    } finally {
+      setIsBootstrapping(false);
+    }
+  };
+
+  // Handle Explicit User Rejection for Proposed Execution Plan
+  const handleRejectPlan = async (sandboxId: string, reason?: string) => {
+    const target = sandboxes.find((s) => s.id === sandboxId);
+    if (!target || !target.workflowId) return;
+
+    try {
+      const rejRes = await sandboxApi.rejectWorkflow(
+        target.workflowId,
+        reason || 'User rejected execution plan.',
+        target.planFingerprint
+      );
+
+      finalizeWorkflowResult(sandboxId, rejRes, target);
+    } catch (err: unknown) {
+      setApiNotification({
+        type: 'error',
+        message: `Rejection failed: ${(err as Error)?.message || 'Unknown error'}`,
+      });
+      setTimeout(() => setApiNotification(null), 5000);
     }
   };
 
@@ -612,6 +771,131 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+
+                  {/* Execution Plan Approval Gate Card */}
+                  {activeSandbox.status === 'awaiting_approval' && (
+                    <div className="bg-[#11141c] border-2 border-violet-500/50 rounded-xl p-5 sm:p-6 shadow-[0_0_30px_rgba(139,92,246,0.15)] space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-neutral-800">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-violet-500/20 border border-violet-500/40 text-violet-300">
+                            <ShieldCheck className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h3 className="text-sm font-bold text-neutral-100 tracking-tight">
+                                Action Required: Review & Approve Execution Plan
+                              </h3>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold uppercase bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                                Approval Gate
+                              </span>
+                            </div>
+                            <p className="text-xs text-neutral-400 mt-0.5">
+                              The agent analyzed the setup manifest and prepared the execution steps below. No commands run until you approve.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleRejectPlan(activeSandbox.id)}
+                            disabled={isBootstrapping}
+                            className="px-3.5 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/50 border border-rose-700/50 text-rose-300 text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                            <span>Reject Plan</span>
+                          </button>
+
+                          <button
+                            onClick={() => handleApprovePlan(activeSandbox.id)}
+                            disabled={isBootstrapping}
+                            className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-950/50 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                          >
+                            {isBootstrapping ? (
+                              <RotateCcw className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            )}
+                            <span>Approve Plan & Boot Sandbox</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Plan Fingerprint & Sandbox Isolation Notice */}
+                      <div className="flex flex-wrap items-center justify-between text-xs text-neutral-400 bg-[#0c0e14] px-3.5 py-2 rounded-lg border border-neutral-800/80 gap-2 font-mono">
+                        <div className="flex items-center gap-2">
+                          <span className="text-neutral-500">Plan Fingerprint:</span>
+                          <span className="text-violet-300 select-all">
+                            {activeSandbox.planFingerprint || 'sha256:pending'}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-emerald-400 text-[11px]">
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>Restricted Sandbox Executor Isolation</span>
+                        </div>
+                      </div>
+
+                      {/* Steps List */}
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
+                          Proposed Commands ({activeSandbox.proposedPlan?.length || 0} steps)
+                        </div>
+                        <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                          {activeSandbox.proposedPlan && activeSandbox.proposedPlan.length > 0 ? (
+                            activeSandbox.proposedPlan.map((step) => (
+                              <div
+                                key={step.step}
+                                className="flex items-start justify-between gap-3 p-2.5 rounded-lg bg-[#0e1118] border border-neutral-800 text-xs"
+                              >
+                                <div className="flex items-start gap-2.5 min-w-0">
+                                  <span className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-300 font-mono text-[11px] shrink-0">
+                                    #{step.step}
+                                  </span>
+                                  <div className="min-w-0">
+                                    <div className="font-mono text-neutral-200 text-xs truncate">
+                                      $ {step.command}
+                                    </div>
+                                    <div className="text-[11px] text-neutral-400 mt-0.5">
+                                      {step.description}
+                                    </div>
+                                  </div>
+                                </div>
+                                <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-neutral-800/80 text-neutral-400 shrink-0">
+                                  {step.phase}
+                                </span>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="p-3 text-xs text-neutral-500 font-mono italic text-center">
+                              Standard setup commands configured from manifest.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Rejection notice if status is rejected */}
+                  {activeSandbox.status === 'rejected' && (
+                    <div className="bg-rose-950/20 border border-rose-500/40 rounded-xl p-4 flex items-center justify-between gap-3 text-xs">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 rounded bg-rose-500/20 text-rose-300 shrink-0">
+                          <XCircle className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="font-semibold text-rose-300">Execution Plan Rejected</div>
+                          <div className="text-neutral-400 text-[11px] mt-0.5">
+                            {activeSandbox.rejectionReason || 'Execution was halted at the approval gate without running commands.'}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleRetrySandbox(activeSandbox)}
+                        className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium transition-colors shrink-0"
+                      >
+                        Re-plan Setup
+                      </button>
+                    </div>
+                  )}
 
                   {/* Environment Details (~45%) & Activity Console (~55%) */}
                   <div className="flex flex-col lg:flex-row gap-6 items-stretch">

@@ -1,4 +1,4 @@
-"""Pydantic data schemas for manifest validation and workflow orchestration."""
+"""Pydantic data schemas for manifest validation, discovery, and workflow orchestration."""
 
 from datetime import datetime, timezone
 from enum import Enum
@@ -45,17 +45,74 @@ class StepStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class ApprovalStatus(str, Enum):
+    """Status of user approval for the planned sandbox setup."""
+    AWAITING_APPROVAL = "awaiting_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class WorkflowStatus(str, Enum):
     """Overall status of a setup workflow."""
     QUEUED = "queued"
     RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
+    REJECTED = "rejected"
 
 
 # Valid identifier regex for project name and env var names
 NAME_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 ENV_VAR_REGEX = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+# Supported versions and languages
+SUPPORTED_MANIFEST_VERSIONS = {"1.0", "1"}
+SUPPORTED_LANGUAGES = {"python", "javascript", "typescript", "node"}
+
+# Security inspection rules for sandbox command isolation
+DANGEROUS_PATTERNS = [
+    (re.compile(r"(^|[;&|]\s*)sudo(\s+|$)", re.IGNORECASE), "privilege escalation ('sudo')"),
+    (re.compile(r"(^|[;&|]\s*)(su|doas)(\s+|$)", re.IGNORECASE), "privilege escalation"),
+    (re.compile(r"rm\s+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*)\s+(/|/\*|~|~/\*|\$HOME)", re.IGNORECASE), "prohibited recursive root/home deletion ('rm -rf /')"),
+    (re.compile(r"(curl|wget)\s+[^;&|]*\|\s*(sh|bash|zsh)", re.IGNORECASE), "piping unverified remote script to shell"),
+    (re.compile(r"(sh|bash|zsh)\s+<\s*\(\s*(curl|wget)", re.IGNORECASE), "executing unverified remote script in subshell"),
+    (re.compile(r":\(\)\s*\{", re.IGNORECASE), "prohibited fork bomb expression"),
+    (re.compile(r"(^|[;&|]\s*)(mkfs(\.[a-zA-Z0-9]+)?|dd(\s+|$)|shutdown|reboot)", re.IGNORECASE), "prohibited destructive host operation"),
+    (re.compile(r"(nc|ncat|netcat)\s+.*-e\s+", re.IGNORECASE), "prohibited network reverse shell"),
+]
+
+NODE_TOOL_REGEX = re.compile(r"(^|[;&|]\s*)(npm|pnpm|yarn|bun)(\s+|$)", re.IGNORECASE)
+PYTHON_TOOL_REGEX = re.compile(r"(^|[;&|]\s*)(pip|poetry|pytest|python|python3|uv)(\s+|$)", re.IGNORECASE)
+
+
+def validate_command_security_and_compatibility(cmd: str, runtime: RuntimeType, field_name: str) -> None:
+    """Ensure a command does not violate sandbox isolation policies and matches the declared runtime."""
+    clean = cmd.strip()
+    if not clean:
+        return
+
+    # 1. Check dangerous patterns
+    for pattern, description in DANGEROUS_PATTERNS:
+        if pattern.search(clean):
+            raise ValueError(
+                f"Command '{clean}' in {field_name} contains forbidden {description}. "
+                "All commands must execute within sandbox boundaries with unprivileged permissions."
+            )
+
+    # 2. Check runtime tool compatibility
+    if runtime == RuntimeType.PYTHON:
+        if NODE_TOOL_REGEX.search(clean):
+            raise ValueError(
+                f"Command '{clean}' in {field_name} uses Node.js tooling in a Python runtime environment. "
+                "Use Python tools (pip, poetry, uv, pytest)."
+            )
+    elif runtime == RuntimeType.NODE:
+        if PYTHON_TOOL_REGEX.search(clean):
+            raise ValueError(
+                f"Command '{clean}' in {field_name} uses Python tooling in a Node.js runtime environment. "
+                "Use Node.js tools (npm, pnpm, yarn, bun)."
+            )
 
 
 class SetupManifest(BaseModel):
@@ -66,6 +123,11 @@ class SetupManifest(BaseModel):
         str_strip_whitespace=True,
     )
 
+    version: str = Field(
+        default="1.0",
+        description="Manifest schema specification version.",
+        examples=["1.0"],
+    )
     project_name: str = Field(
         ...,
         min_length=1,
@@ -82,6 +144,11 @@ class SetupManifest(BaseModel):
         ...,
         description="Core language runtime.",
         examples=[RuntimeType.PYTHON],
+    )
+    language: Optional[str] = Field(
+        default=None,
+        description="Primary programming language (e.g., 'python', 'javascript', 'typescript'). Inferred if omitted.",
+        examples=["python", "typescript"],
     )
     runtime_version: str = Field(
         ...,
@@ -105,6 +172,10 @@ class SetupManifest(BaseModel):
         description="List of required environment variable names (keys only, never secrets or values).",
         examples=[["PORT", "DATABASE_URL"]],
     )
+    environment_variables: Optional[List[str]] = Field(
+        default=None,
+        description="Optional alias for env_var_names (keys only, never secrets or values).",
+    )
     setup_steps: List[str] = Field(
         default_factory=lambda: [
             "validate_manifest",
@@ -113,6 +184,16 @@ class SetupManifest(BaseModel):
             "run_health_checks",
         ],
         description="List of deterministic setup pipeline step names.",
+    )
+    setup_commands: List[str] = Field(
+        default_factory=list,
+        description="Deterministic setup commands to execute within the sandbox environment.",
+        examples=[["poetry install --no-root"]],
+    )
+    validation_commands: List[str] = Field(
+        default_factory=list,
+        description="Deterministic validation/test commands to execute to verify the sandbox.",
+        examples=[["poetry run pytest"]],
     )
     port: Optional[int] = Field(
         default=None,
@@ -145,6 +226,33 @@ class SetupManifest(BaseModel):
         description="Git branch name.",
         examples=["main"],
     )
+    repo_path: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Optional local filesystem path to the repository for discovery.",
+    )
+
+    @field_validator("version")
+    @classmethod
+    def validate_manifest_version(cls, v: str) -> str:
+        clean = v.strip()
+        if clean not in SUPPORTED_MANIFEST_VERSIONS:
+            raise ValueError(
+                f"Unsupported manifest version '{clean}'. Supported manifest schema versions: {', '.join(sorted(SUPPORTED_MANIFEST_VERSIONS))}."
+            )
+        return clean
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        clean = v.strip().lower()
+        if clean not in SUPPORTED_LANGUAGES:
+            raise ValueError(
+                f"Unsupported language '{clean}'. Supported languages: {', '.join(sorted(SUPPORTED_LANGUAGES))}."
+            )
+        return clean
 
     @field_validator("project_name")
     @classmethod
@@ -156,9 +264,11 @@ class SetupManifest(BaseModel):
             )
         return clean
 
-    @field_validator("env_var_names")
+    @field_validator("env_var_names", "environment_variables")
     @classmethod
-    def validate_env_var_names(cls, v: List[str]) -> List[str]:
+    def validate_env_var_names(cls, v: Optional[List[str]]) -> List[str]:
+        if v is None:
+            return []
         cleaned: List[str] = []
         for name in v:
             clean = name.strip()
@@ -175,13 +285,76 @@ class SetupManifest(BaseModel):
             cleaned.append(clean)
         return cleaned
 
+    @field_validator("setup_commands", "validation_commands")
+    @classmethod
+    def validate_commands_list(cls, v: List[str]) -> List[str]:
+        cleaned: List[str] = []
+        for cmd in v:
+            clean = cmd.strip()
+            if not clean:
+                continue
+            if len(clean) > 500:
+                raise ValueError(f"Command exceeds maximum length of 500 characters: '{clean[:50]}...'")
+            cleaned.append(clean)
+        return cleaned
+
     @model_validator(mode="after")
     def validate_runtime_and_package_manager_compatibility(self) -> "SetupManifest":
-        """Verify that the package manager and project type match the selected runtime."""
+        """Verify that runtime, version, language, package manager, and commands are compatible and safe."""
         node_pms = {PackageManager.NPM, PackageManager.PNPM, PackageManager.YARN, PackageManager.BUN}
         python_pms = {PackageManager.PIP, PackageManager.POETRY, PackageManager.UV}
 
-        if self.runtime == RuntimeType.NODE:
+        # Synchronize environment_variables into env_var_names if needed
+        if self.environment_variables:
+            for ev in self.environment_variables:
+                if ev not in self.env_var_names:
+                    self.env_var_names.append(ev)
+
+        # Validate runtime version format and compatibility
+        v = self.runtime_version.strip()
+        if self.runtime == RuntimeType.PYTHON:
+            m = re.match(r"^3\.(\d+)(\.\d+)?.*$", v)
+            if not m:
+                raise ValueError(
+                    f"Invalid Python runtime version format '{v}'. Expected semver format such as '3.11.9' or '3.12'."
+                )
+            minor = int(m.group(1))
+            if minor < 8 or minor > 14:
+                raise ValueError(
+                    f"Unsupported Python runtime version '{v}'. Supported Python versions are 3.8 through 3.14 (e.g., '3.11.9', '3.12')."
+                )
+
+            if self.package_manager not in python_pms:
+                raise ValueError(
+                    f"Package manager '{self.package_manager.value}' is incompatible with Python runtime. Supported: {', '.join(sorted(pm.value for pm in python_pms))}."
+                )
+            if self.project_type in {ProjectType.NODE_APP, ProjectType.NEXTJS_APP, ProjectType.EXPRESS_API}:
+                raise ValueError(
+                    f"Project type '{self.project_type.value}' requires a Node runtime, but 'python' was provided."
+                )
+            if self.port is None:
+                self.port = 8000
+
+            # Language inference and compatibility
+            if self.language is None:
+                self.language = "python"
+            elif self.language in {"javascript", "typescript"}:
+                raise ValueError(
+                    f"Language '{self.language}' is incompatible with Python runtime. Expected 'python'."
+                )
+
+        elif self.runtime == RuntimeType.NODE:
+            m = re.match(r"^(\d+)(\.\d+)?(\.\d+)?.*$", v)
+            if not m:
+                raise ValueError(
+                    f"Invalid Node.js runtime version format '{v}'. Expected semver format such as '20.14.0' or '18'."
+                )
+            major = int(m.group(1))
+            if major not in {16, 18, 20, 22}:
+                raise ValueError(
+                    f"Unsupported Node.js runtime version '{v}'. Supported Node versions are 16, 18, 20, 22 (e.g., '20.14.0', '18.20.0')."
+                )
+
             if self.package_manager not in node_pms:
                 raise ValueError(
                     f"Package manager '{self.package_manager.value}' is incompatible with Node.js runtime. Supported: {', '.join(sorted(pm.value for pm in node_pms))}."
@@ -193,17 +366,29 @@ class SetupManifest(BaseModel):
             if self.port is None:
                 self.port = 3000
 
-        elif self.runtime == RuntimeType.PYTHON:
-            if self.package_manager not in python_pms:
+            # Language inference and compatibility
+            if self.language is None:
+                self.language = "typescript" if self.project_type == ProjectType.NEXTJS_APP else "javascript"
+            elif self.language == "python":
                 raise ValueError(
-                    f"Package manager '{self.package_manager.value}' is incompatible with Python runtime. Supported: {', '.join(sorted(pm.value for pm in python_pms))}."
+                    f"Language '{self.language}' is incompatible with Node.js runtime. Expected 'javascript' or 'typescript'."
                 )
-            if self.project_type in {ProjectType.NODE_APP, ProjectType.NEXTJS_APP, ProjectType.EXPRESS_API}:
-                raise ValueError(
-                    f"Project type '{self.project_type.value}' requires a Node runtime, but 'python' was provided."
-                )
-            if self.port is None:
-                self.port = 8000
+
+        # Synchronize test_command and validation_commands
+        if self.test_command and not self.validation_commands:
+            self.validation_commands = [self.test_command]
+        elif self.validation_commands and not self.test_command:
+            self.test_command = self.validation_commands[0]
+
+        # Security inspection across all declared commands
+        for cmd in self.setup_commands:
+            validate_command_security_and_compatibility(cmd, self.runtime, "setup_commands")
+        for cmd in self.validation_commands:
+            validate_command_security_and_compatibility(cmd, self.runtime, "validation_commands")
+        if self.start_command:
+            validate_command_security_and_compatibility(self.start_command, self.runtime, "start_command")
+        if self.test_command:
+            validate_command_security_and_compatibility(self.test_command, self.runtime, "test_command")
 
         return self
 
@@ -226,6 +411,31 @@ class ValidationResult(BaseModel):
     )
 
 
+class ManifestDiscoveryRequest(BaseModel):
+    """Request payload to discover or infer a setup manifest from a repository."""
+    repo_path: Optional[str] = Field(
+        default=None,
+        description="Local directory path of the repository.",
+        examples=["/path/to/my-repo"],
+    )
+    repo_url: Optional[str] = Field(
+        default=None,
+        description="Optional Git repository URL.",
+        examples=["https://github.com/org/repo"],
+    )
+
+
+class ManifestDiscoveryResult(BaseModel):
+    """Result of searching a repository for a setup manifest or generating a fallback."""
+    discovered: bool = Field(..., description="True if a valid manifest file or inferred project configuration was found.")
+    source: str = Field(..., description="Identifier of the discovery source (e.g., 'explicit_file: sandbox.manifest.json', 'inferred: pyproject.toml', 'fallback: default').")
+    manifest_file_path: Optional[str] = Field(default=None, description="Path to the discovered manifest file if one was found.")
+    manifest: Optional[SetupManifest] = Field(default=None, description="The validated or inferred SetupManifest.")
+    is_fallback: bool = Field(default=False, description="True if a fallback manifest was generated due to missing or unsupported repository files.")
+    warnings: List[str] = Field(default_factory=list, description="Discovery warnings or notes.")
+    errors: List[ValidationErrorDetail] = Field(default_factory=list, description="Validation errors if an explicit manifest was invalid.")
+
+
 class WorkflowStep(BaseModel):
     """Individual phase in the setup pipeline."""
     name: str = Field(..., description="Step identifier.")
@@ -237,6 +447,36 @@ class WorkflowStep(BaseModel):
     error_message: Optional[str] = Field(default=None, description="Diagnostic error details if step failed.")
 
 
+class ApprovalDecisionRequest(BaseModel):
+    """Request payload to approve or reject a pending workflow plan."""
+    approved: bool = Field(..., description="True to approve execution, False to reject.")
+    plan_fingerprint: Optional[str] = Field(
+        default=None,
+        description="Optional SHA256 digest of the plan displayed to the user to guard against race conditions.",
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description="Optional user comments or rejection explanation.",
+    )
+
+
+class WorkflowPlanResponse(BaseModel):
+    """Detailed plan submitted for user inspection and approval."""
+    workflow_id: str = Field(..., description="Unique workflow identifier.")
+    status: WorkflowStatus = Field(..., description="Overall workflow status.")
+    approval_status: ApprovalStatus = Field(..., description="Approval status.")
+    plan_fingerprint: str = Field(..., description="Deterministic SHA256 digest of the execution plan.")
+    execution_plan: List[Dict[str, Any]] = Field(..., description="Ordered list of planned execution steps.")
+    setup_commands: List[str] = Field(default_factory=list, description="Commands planned for environment setup.")
+    validation_commands: List[str] = Field(default_factory=list, description="Commands planned for verification.")
+    runtime: str = Field(..., description="Target runtime and version.")
+    package_manager: str = Field(..., description="Package manager to be used.")
+    dependencies_count: int = Field(..., description="Number of declared dependencies.")
+    is_ready_for_approval: bool = Field(..., description="True if workflow is currently paused awaiting approval.")
+    approved_at: Optional[datetime] = Field(default=None, description="Timestamp of approval if approved.")
+    rejection_reason: Optional[str] = Field(default=None, description="Reason for rejection if rejected.")
+
+
 class WorkflowCreateResponse(BaseModel):
     """Response returned upon successful workflow initialization."""
     workflow_id: str = Field(..., description="Unique workflow identifier.")
@@ -245,6 +485,9 @@ class WorkflowCreateResponse(BaseModel):
     created_at: datetime = Field(..., description="Creation timestamp in UTC.")
     steps: List[WorkflowStep] = Field(..., description="Initial workflow step progression.")
     message: str = Field(..., description="Status summary message.")
+    approval_status: Optional[ApprovalStatus] = Field(default=None, description="Initial approval status.")
+    plan_fingerprint: Optional[str] = Field(default=None, description="Execution plan fingerprint if plan was created.")
+    execution_plan: Optional[List[Dict[str, Any]]] = Field(default=None, description="Planned execution steps.")
 
 
 class WorkflowStatusResponse(BaseModel):
@@ -258,6 +501,11 @@ class WorkflowStatusResponse(BaseModel):
     steps: List[WorkflowStep] = Field(..., description="Step details and execution history.")
     manifest_summary: Dict[str, Any] = Field(..., description="Safe summary of the validated manifest.")
     error_details: Optional[str] = Field(default=None, description="High-level error description if workflow failed.")
+    approval_status: Optional[ApprovalStatus] = Field(default=None, description="Approval status (awaiting_approval, approved, rejected).")
+    plan_fingerprint: Optional[str] = Field(default=None, description="Deterministic hash of the execution plan.")
+    execution_plan: Optional[List[Dict[str, Any]]] = Field(default=None, description="Planned execution steps.")
+    approved_at: Optional[datetime] = Field(default=None, description="Approval timestamp in UTC.")
+    rejection_reason: Optional[str] = Field(default=None, description="User rejection reason if rejected.")
 
 
 class APIErrorResponse(BaseModel):

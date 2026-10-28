@@ -252,6 +252,10 @@ testpaths = ["tests"]`;
                   className={`text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded font-semibold flex items-center gap-1.5 ${
                     sandbox.status === 'running'
                       ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                      : sandbox.status === 'awaiting_approval'
+                      ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40'
+                      : sandbox.status === 'rejected'
+                      ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
                       : sandbox.status === 'failed'
                       ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
                       : sandbox.status === 'success'
@@ -261,6 +265,12 @@ testpaths = ["tests"]`;
                 >
                   {sandbox.status === 'running' && (
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+                  )}
+                  {sandbox.status === 'awaiting_approval' && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse inline-block" />
+                  )}
+                  {sandbox.status === 'rejected' && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block" />
                   )}
                   {sandbox.status === 'failed' && (
                     <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block" />

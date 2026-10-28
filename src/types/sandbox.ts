@@ -2,7 +2,17 @@ export type RuntimeType = 'node' | 'python';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'pip' | 'poetry' | 'uv';
 
-export type SandboxStatus = 'queued' | 'running' | 'success' | 'failed' | 'stopped';
+export type SandboxStatus = 'queued' | 'running' | 'awaiting_approval' | 'rejected' | 'success' | 'failed' | 'stopped';
+
+export type ApprovalStatus = 'awaiting_approval' | 'approved' | 'rejected';
+
+export interface PlannedExecutionStep {
+  step: number;
+  phase: string;
+  command: string;
+  description: string;
+  is_safe: boolean;
+}
 
 export type WorkflowStepId = 'inspection' | 'dependencies' | 'configuration' | 'verification';
 
@@ -80,6 +90,11 @@ export interface Sandbox {
   previewUrl?: string;
   workflowId?: string;
   backendSynced?: boolean;
+  approvalStatus?: ApprovalStatus;
+  planFingerprint?: string;
+  proposedPlan?: PlannedExecutionStep[];
+  approvedAt?: string;
+  rejectionReason?: string;
 }
 
 export type ActiveNavTab = 'overview' | 'new-sandbox' | 'history' | 'settings';

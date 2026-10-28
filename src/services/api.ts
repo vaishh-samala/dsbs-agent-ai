@@ -33,24 +33,75 @@ export type BackendStepStatus =
 export type BackendWorkflowStatus =
   | 'queued'
   | 'running'
+  | 'awaiting_approval'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'rejected';
+
+export type BackendApprovalStatus =
+  | 'awaiting_approval'
+  | 'approved'
+  | 'rejected';
+
+export interface PlannedStep {
+  step: number;
+  phase: string;
+  command: string;
+  description: string;
+  is_safe: boolean;
+}
+
+export interface ApprovalDecisionRequest {
+  approved: boolean;
+  plan_fingerprint?: string;
+  reason?: string;
+}
+
+export interface WorkflowPlanResponse {
+  workflow_id: string;
+  status: BackendWorkflowStatus;
+  approval_status: BackendApprovalStatus;
+  plan_fingerprint: string;
+  execution_plan: PlannedStep[];
+  setup_commands: string[];
+  validation_commands: string[];
+  runtime: string;
+  package_manager: string;
+  dependencies_count: number;
+  is_ready_for_approval: boolean;
+  approved_at?: string | null;
+  rejection_reason?: string | null;
+}
 
 /** Setup manifest matching backend SetupManifest schema (extra="forbid") */
 export interface SetupManifestPayload {
+  version?: string;
   project_name: string;
   project_type: BackendProjectType;
   runtime: BackendRuntimeType;
+  language?: string;
   runtime_version: string;
   package_manager: BackendPackageManager;
   dependencies?: string[];
   env_var_names?: string[]; // Keys only, never values or '='
   setup_steps?: string[];
+  setup_commands?: string[];
+  validation_commands?: string[];
   port?: number;
   start_command?: string;
   test_command?: string;
   repo_url?: string;
   branch?: string;
+  repo_path?: string;
+}
+
+export interface ManifestDiscoveryResult {
+  discovered: boolean;
+  source: string;
+  manifest_file_path?: string | null;
+  manifest: SetupManifestPayload;
+  is_fallback: boolean;
+  warnings: string[];
 }
 
 export interface ValidationErrorDetail {
@@ -83,6 +134,9 @@ export interface WorkflowCreateResponse {
   created_at: string;
   steps: BackendWorkflowStep[];
   message: string;
+  approval_status?: BackendApprovalStatus | null;
+  plan_fingerprint?: string | null;
+  execution_plan?: PlannedStep[] | null;
 }
 
 export interface WorkflowManifestSummary {
@@ -105,6 +159,11 @@ export interface WorkflowStatusResponse {
   steps: BackendWorkflowStep[];
   manifest_summary: WorkflowManifestSummary;
   error_details?: string | null;
+  approval_status?: BackendApprovalStatus | null;
+  plan_fingerprint?: string | null;
+  execution_plan?: PlannedStep[] | null;
+  approved_at?: string | null;
+  rejection_reason?: string | null;
 }
 
 export interface APIErrorResponse {
@@ -222,6 +281,17 @@ export const sandboxApi = {
   },
 
   /**
+   * Discover or infer setup manifest in a repository directory
+   * POST /api/v1/sandbox/manifest/discover
+   */
+  async discoverManifest(repoPath: string): Promise<ManifestDiscoveryResult> {
+    return request<ManifestDiscoveryResult>(`${API_V1_PREFIX}/sandbox/manifest/discover`, {
+      method: 'POST',
+      body: JSON.stringify({ repo_path: repoPath }),
+    });
+  },
+
+  /**
    * Validate setup manifest structure and runtime compatibility
    * POST /api/v1/sandbox/validate
    */
@@ -252,7 +322,48 @@ export const sandboxApi = {
   },
 
   /**
-   * Poll workflow status until terminal status (completed or failed) or timeout
+   * Retrieve the pending execution plan for inspection and approval
+   * GET /api/v1/sandbox/{workflow_id}/plan
+   */
+  async getWorkflowPlan(workflowId: string): Promise<WorkflowPlanResponse> {
+    return request<WorkflowPlanResponse>(`${API_V1_PREFIX}/sandbox/${encodeURIComponent(workflowId)}/plan`);
+  },
+
+  /**
+   * Explicitly approve the proposed plan to resume sandbox setup
+   * POST /api/v1/sandbox/{workflow_id}/approve
+   */
+  async approveWorkflow(
+    workflowId: string,
+    decision?: ApprovalDecisionRequest
+  ): Promise<WorkflowStatusResponse> {
+    return request<WorkflowStatusResponse>(`${API_V1_PREFIX}/sandbox/${encodeURIComponent(workflowId)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(decision || { approved: true }),
+    });
+  },
+
+  /**
+   * Explicitly reject the proposed plan, cleanly halting execution
+   * POST /api/v1/sandbox/{workflow_id}/reject
+   */
+  async rejectWorkflow(
+    workflowId: string,
+    reason?: string,
+    planFingerprint?: string
+  ): Promise<WorkflowStatusResponse> {
+    return request<WorkflowStatusResponse>(`${API_V1_PREFIX}/sandbox/${encodeURIComponent(workflowId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({
+        approved: false,
+        reason,
+        plan_fingerprint: planFingerprint,
+      }),
+    });
+  },
+
+  /**
+   * Poll workflow status until terminal status (completed, failed, awaiting_approval, or rejected) or timeout
    */
   async pollWorkflowStatus(
     workflowId: string,
@@ -267,7 +378,12 @@ export const sandboxApi = {
       if (onProgress) {
         onProgress(statusRes);
       }
-      if (statusRes.status === 'completed' || statusRes.status === 'failed') {
+      if (
+        statusRes.status === 'completed' ||
+        statusRes.status === 'failed' ||
+        statusRes.status === 'awaiting_approval' ||
+        statusRes.status === 'rejected'
+      ) {
         return statusRes;
       }
       await new Promise((resolve) => setTimeout(resolve, intervalMs));

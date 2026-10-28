@@ -1,0 +1,18 @@
+[
+  "backend/tests/test_agent.py::test_environment_allocation_failure_branch",
+  "backend/tests/test_agent.py::test_execution_failure_branch_halts_before_verification",
+  "backend/tests/test_agent.py::test_final_state_includes_step_statuses_and_summary",
+  "backend/tests/test_agent.py::test_invalid_manifest_stops_before_execution",
+  "backend/tests/test_agent.py::test_valid_manifest_successful_graph_run",
+  "backend/tests/test_agent.py::test_workflow_service_langgraph_integration",
+  "backend/tests/test_health.py::test_health_endpoint_returns_200",
+  "backend/tests/test_sandbox.py::test_env_var_values_and_secrets_are_rejected_and_not_exposed",
+  "backend/tests/test_sandbox.py::test_extra_forbidden_fields_are_rejected",
+  "backend/tests/test_sandbox.py::test_invalid_manifest_returns_useful_validation_errors",
+  "backend/tests/test_sandbox.py::test_manifest_schema_endpoint",
+  "backend/tests/test_sandbox.py::test_setup_returns_unique_workflow_id_and_initial_steps",
+  "backend/tests/test_sandbox.py::test_setup_with_invalid_manifest_returns_422",
+  "backend/tests/test_sandbox.py::test_unknown_workflow_id_returns_404",
+  "backend/tests/test_sandbox.py::test_valid_manifest_passes_validation",
+  "backend/tests/test_sandbox.py::test_workflow_status_can_be_retrieved"
+]

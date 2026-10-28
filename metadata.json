@@ -1,0 +1,6 @@
+{
+  "name": "Developer Sandbox Bootstrapper",
+  "description": "Automated test environment preparation and runtime verification for GitHub repositories.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

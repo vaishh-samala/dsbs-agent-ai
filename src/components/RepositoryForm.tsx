@@ -13,9 +13,18 @@ import {
   ChevronDown,
   ChevronUp,
   Settings2,
+  CheckCircle2,
+  ShieldCheck,
+  Check,
 } from 'lucide-react';
 import { PackageManager, RuntimeType } from '../types/sandbox';
 import { REPO_PRESETS, RepoPreset } from '../data/repoPresets';
+import {
+  sandboxApi,
+  buildSetupManifestPayload,
+  ValidationResult,
+  ApiError,
+} from '../services/api';
 
 interface RepositoryFormProps {
   onSubmit: (formData: {
@@ -54,6 +63,51 @@ export const RepositoryForm: React.FC<RepositoryFormProps> = ({
 
   // Form errors
   const [errors, setErrors] = useState<{ repoUrl?: string; branch?: string; port?: string }>({});
+
+  // Backend manifest validation state
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
+  const [validationApiError, setValidationApiError] = useState<string | null>(null);
+
+  const handleValidateManifest = async () => {
+    if (!validate()) return;
+    setIsValidating(true);
+    setValidationResult(null);
+    setValidationApiError(null);
+
+    const payload = buildSetupManifestPayload({
+      repoUrl,
+      branch,
+      runtime,
+      runtimeVersion,
+      packageManager,
+      port,
+      startCommand: startCommand.trim() || undefined,
+      testCommand: testCommand.trim() || undefined,
+      envVars: envVars.filter((v) => v.key.trim() !== ''),
+      simulateFailure,
+    });
+
+    try {
+      const res = await sandboxApi.validateManifest(payload);
+      setValidationResult(res);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        setValidationApiError(err.message);
+        if (err.errors && err.errors.length > 0) {
+          setValidationResult({
+            is_valid: false,
+            errors: err.errors,
+            warnings: [],
+          });
+        }
+      } else {
+        setValidationApiError((err as Error)?.message || 'Failed to connect to backend.');
+      }
+    } finally {
+      setIsValidating(false);
+    }
+  };
 
   // Sync default versions when runtime changes
   const handleRuntimeChange = (newRuntime: RuntimeType) => {
@@ -480,32 +534,116 @@ export const RepositoryForm: React.FC<RepositoryFormProps> = ({
           </button>
         </div>
 
+        {/* Manifest Validation Feedback Panel */}
+        {isValidating && (
+          <div className="p-3.5 rounded-lg bg-[#0e121a] border border-violet-500/30 text-xs text-neutral-300 flex items-center gap-2.5 animate-pulse">
+            <div className="w-3.5 h-3.5 border-2 border-violet-400 border-t-transparent rounded-full animate-spin shrink-0" />
+            <span>Validating manifest schema and runtime compatibility against FastAPI backend...</span>
+          </div>
+        )}
+
+        {validationResult && validationResult.is_valid && (
+          <div className="p-3.5 rounded-lg bg-emerald-950/20 border border-emerald-500/40 text-xs space-y-2">
+            <div className="flex items-center gap-2 text-emerald-400 font-semibold">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>Manifest Validated Successfully (POST /api/v1/sandbox/validate)</span>
+            </div>
+            <div className="text-[11px] text-neutral-300 font-mono flex flex-wrap gap-x-3 gap-y-1">
+              <span>Archetype: <strong className="text-neutral-100">{validationResult.normalized_manifest?.project_type}</strong></span>
+              <span className="text-neutral-600">·</span>
+              <span>Port: <strong className="text-neutral-100">{validationResult.normalized_manifest?.port}</strong></span>
+              <span className="text-neutral-600">·</span>
+              <span>Env Var Keys: <strong className="text-neutral-100">[{validationResult.normalized_manifest?.env_var_names?.join(', ') || 'PORT'}]</strong></span>
+            </div>
+            {validationResult.warnings && validationResult.warnings.length > 0 && (
+              <div className="mt-1 pt-1.5 border-t border-emerald-900/40 text-[11px] text-amber-300 space-y-0.5">
+                {validationResult.warnings.map((w, idx) => (
+                  <div key={idx} className="flex items-center gap-1.5">
+                    <span className="text-amber-400 font-bold">!</span>
+                    <span>{w}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {validationResult && !validationResult.is_valid && (
+          <div className="p-3.5 rounded-lg bg-rose-950/25 border border-rose-500/40 text-xs space-y-2">
+            <div className="flex items-center gap-2 text-rose-400 font-semibold">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>Manifest Validation Failed ({validationResult.errors.length} errors)</span>
+            </div>
+            <div className="space-y-1 pl-6 text-[11px] font-mono text-rose-300">
+              {validationResult.errors.map((err, idx) => (
+                <div key={idx} className="flex items-start gap-1.5">
+                  <span className="text-rose-400 font-bold">•</span>
+                  <span>
+                    <strong className="text-rose-200">[{err.field}]</strong>: {err.message}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {validationApiError && (
+          <div className="p-3 rounded-lg bg-rose-950/20 border border-rose-800/40 text-xs text-rose-300 flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <div className="font-semibold text-rose-300">Validation API Request Error</div>
+              <div className="text-[11px] text-neutral-300 font-mono">{validationApiError}</div>
+            </div>
+          </div>
+        )}
+
         {/* Submit Action */}
-        <div className="pt-2 flex items-center justify-between">
+        <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="text-[11px] text-neutral-400">
             Isolated Sandbox · 2 vCPU · 2048 MB RAM
           </div>
-          <button
-            type="submit"
-            disabled={isLoading}
-            className={`flex items-center gap-2 px-5 py-2.5 rounded-md text-xs font-semibold text-white transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 cursor-pointer ${
-              isLoading
-                ? 'bg-violet-600/50 cursor-not-allowed'
-                : 'bg-violet-600 hover:bg-violet-500 active:bg-violet-700 shadow-sm shadow-violet-950/40'
-            }`}
-          >
-            {isLoading ? (
-              <>
-                <div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-                <span>Bootstrapping Environment...</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>Create Sandbox</span>
-              </>
-            )}
-          </button>
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={handleValidateManifest}
+              disabled={isValidating || isLoading}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-md text-xs font-medium text-neutral-200 bg-neutral-800 hover:bg-neutral-700 active:bg-neutral-600 transition-colors cursor-pointer border border-neutral-700/60 disabled:opacity-50"
+            >
+              {isValidating ? (
+                <>
+                  <div className="w-3.5 h-3.5 border-2 border-neutral-400 border-t-white rounded-full animate-spin" />
+                  <span>Validating...</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>Validate Manifest</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="submit"
+              disabled={isLoading || isValidating}
+              className={`flex items-center gap-2 px-5 py-2 rounded-md text-xs font-semibold text-white transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 cursor-pointer ${
+                isLoading
+                  ? 'bg-violet-600/50 cursor-not-allowed'
+                  : 'bg-violet-600 hover:bg-violet-500 active:bg-violet-700 shadow-sm shadow-violet-950/40'
+              }`}
+            >
+              {isLoading ? (
+                <>
+                  <div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                  <span>Bootstrapping Environment...</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Create Sandbox</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </form>

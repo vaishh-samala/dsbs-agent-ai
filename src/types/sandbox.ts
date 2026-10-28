@@ -78,6 +78,8 @@ export interface Sandbox {
   errorSummary?: ErrorSummary;
   healthStatus?: HealthStatus;
   previewUrl?: string;
+  workflowId?: string;
+  backendSynced?: boolean;
 }
 
 export type ActiveNavTab = 'overview' | 'new-sandbox' | 'history' | 'settings';

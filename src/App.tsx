@@ -1,13 +1,22 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   ActiveNavTab,
+  ErrorSummary,
   PackageManager,
   RuntimeType,
   Sandbox,
+  StepStatus,
+  WorkflowStep,
   WorkflowStepId,
 } from './types/sandbox';
 import { INITIAL_MOCK_SANDBOXES } from './data/mockSandboxes';
-import { startSandboxSimulation } from './utils/sandboxSimulator';
+import { parseRepoDetails, startSandboxSimulation } from './utils/sandboxSimulator';
+import {
+  sandboxApi,
+  buildSetupManifestPayload,
+  BACKEND_BASE_URL,
+  BackendWorkflowStep,
+} from './services/api';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { OverviewCards } from './components/OverviewCards';
@@ -18,7 +27,53 @@ import { DetailedSandboxModal } from './components/DetailedSandboxModal';
 import { SandboxHistoryView } from './components/SandboxHistoryView';
 import { SettingsView } from './components/SettingsView';
 import { MockPreviewModal } from './components/MockPreviewModal';
-import { Github, RotateCcw, Terminal } from 'lucide-react';
+import { Github, RotateCcw, Terminal, CheckCircle2, AlertCircle } from 'lucide-react';
+
+function mapBackendStepToFrontend(
+  backendStep: BackendWorkflowStep,
+  existingStep: WorkflowStep
+): WorkflowStep {
+  let status: StepStatus = 'pending';
+  if (backendStep.status === 'completed') status = 'completed';
+  else if (backendStep.status === 'running') status = 'running';
+  else if (backendStep.status === 'failed') status = 'failed';
+  else if (backendStep.status === 'skipped') status = 'skipped';
+
+  return {
+    ...existingStep,
+    status,
+    durationMs: backendStep.duration_seconds
+      ? Math.round(backendStep.duration_seconds * 1000)
+      : existingStep.durationMs,
+    startedAt: backendStep.started_at ? 'Just now' : existingStep.startedAt,
+    completedAt: backendStep.completed_at ? 'Just now' : existingStep.completedAt,
+    error: backendStep.error_message || existingStep.error,
+  };
+}
+
+function mapBackendStepsToPipeline(
+  backendSteps: BackendWorkflowStep[],
+  baseSteps: WorkflowStep[]
+): WorkflowStep[] {
+  const stepMap: Record<string, BackendWorkflowStep> = {};
+  backendSteps.forEach((s) => {
+    stepMap[s.name] = s;
+  });
+
+  return baseSteps.map((step) => {
+    let backendName = '';
+    if (step.id === 'inspection') backendName = 'validate_manifest';
+    else if (step.id === 'dependencies') backendName = 'resolve_dependencies';
+    else if (step.id === 'configuration') backendName = 'prepare_environment';
+    else if (step.id === 'verification') backendName = 'run_health_checks';
+
+    const matched = stepMap[backendName];
+    if (matched) {
+      return mapBackendStepToFrontend(matched, step);
+    }
+    return step;
+  });
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveNavTab>('overview');
@@ -27,6 +82,17 @@ export default function App() {
   const [isBootstrapping, setIsBootstrapping] = useState(false);
   const [historyFilter, setHistoryFilter] = useState<string>('all');
 
+  // Backend Health and API Status
+  const [backendHealth, setBackendHealth] = useState<{
+    status: 'healthy' | 'offline' | 'checking';
+    version?: string;
+  }>({ status: 'checking', version: '1.0.0' });
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [apiNotification, setApiNotification] = useState<{
+    type: 'success' | 'error' | 'info';
+    message: string;
+  } | null>(null);
+
   // Modals
   const [detailModalSandbox, setDetailModalSandbox] = useState<Sandbox | null>(null);
   const [previewModalSandbox, setPreviewModalSandbox] = useState<Sandbox | null>(null);
@@ -34,12 +100,69 @@ export default function App() {
   // Active step filter for logs in Overview
   const [selectedWorkflowStep, setSelectedWorkflowStep] = useState<WorkflowStepId | 'all'>('all');
 
-  // Cancel ref for simulator
+  // Cancel ref for simulator fallback
   const cancelSimulationRef = useRef<(() => void) | null>(null);
 
   // Active Sandbox
   const activeSandbox =
     sandboxes.find((s) => s.id === activeSandboxId) || sandboxes[0] || null;
+
+  // Query Backend Health on Mount
+  useEffect(() => {
+    checkHealth();
+  }, []);
+
+  const checkHealth = async () => {
+    try {
+      const res = await sandboxApi.checkHealth();
+      setBackendHealth({ status: 'healthy', version: res.version });
+    } catch {
+      setBackendHealth({ status: 'offline' });
+    }
+  };
+
+  // Header Refresh Handler
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    await checkHealth();
+
+    if (activeSandbox?.workflowId) {
+      try {
+        const statusRes = await sandboxApi.getWorkflowStatus(activeSandbox.workflowId);
+        setSandboxes((prev) =>
+          prev.map((s) => {
+            if (s.id === activeSandbox.id) {
+              const updatedSteps = mapBackendStepsToPipeline(statusRes.steps, s.steps);
+              return {
+                ...s,
+                status:
+                  statusRes.status === 'completed'
+                    ? 'running'
+                    : statusRes.status === 'failed'
+                    ? 'failed'
+                    : 'running',
+                steps: updatedSteps,
+                backendSynced: true,
+              };
+            }
+            return s;
+          })
+        );
+        setApiNotification({
+          type: 'success',
+          message: `Synced workflow ${activeSandbox.workflowId} with backend (${statusRes.status.toUpperCase()}).`,
+        });
+        setTimeout(() => setApiNotification(null), 3500);
+      } catch (err: unknown) {
+        setApiNotification({
+          type: 'error',
+          message: `Refresh failed: ${(err as Error)?.message || 'Unknown error'}`,
+        });
+        setTimeout(() => setApiNotification(null), 4000);
+      }
+    }
+    setIsRefreshing(false);
+  };
 
   // Cleanup simulation on unmount
   useEffect(() => {
@@ -50,8 +173,8 @@ export default function App() {
     };
   }, []);
 
-  // Handle Form Submission / Start Simulation
-  const handleCreateSandbox = (formData: {
+  // Handle Form Submission / Start Simulation with Backend Setup & Polling
+  const handleCreateSandbox = async (formData: {
     repoUrl: string;
     branch: string;
     runtime: RuntimeType;
@@ -64,43 +187,252 @@ export default function App() {
     simulateFailure: boolean;
   }) => {
     setIsBootstrapping(true);
-    const newId = `sbx-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    // Cancel any ongoing simulation
+    // Cancel any ongoing fallback simulation
     if (cancelSimulationRef.current) {
       cancelSimulationRef.current();
+      cancelSimulationRef.current = null;
     }
 
-    const cancel = startSandboxSimulation({
-      sandboxId: newId,
-      name: '',
-      repoUrl: formData.repoUrl,
-      branch: formData.branch,
-      runtime: formData.runtime,
-      runtimeVersion: formData.runtimeVersion,
-      packageManager: formData.packageManager,
-      startCommand: formData.startCommand,
-      testCommand: formData.testCommand,
-      port: formData.port,
-      envVars: formData.envVars,
-      simulateFailure: formData.simulateFailure,
-      onUpdate: (updatedSandbox) => {
-        setSandboxes((prev) => {
-          const exists = prev.some((s) => s.id === updatedSandbox.id);
-          if (exists) {
-            return prev.map((s) => (s.id === updatedSandbox.id ? updatedSandbox : s));
-          }
-          return [updatedSandbox, ...prev];
-        });
-      },
-      onFinish: () => {
-        setIsBootstrapping(false);
-      },
-    });
+    const { owner, name } = parseRepoDetails(formData.repoUrl);
+    const payload = buildSetupManifestPayload(formData);
 
-    cancelSimulationRef.current = cancel;
-    setActiveSandboxId(newId);
-    setActiveTab('overview');
+    try {
+      // 1. Submit setup workflow to FastAPI backend
+      const initRes = await sandboxApi.createSandboxSetup(payload);
+      const newId = initRes.workflow_id;
+
+      const basePipeline: WorkflowStep[] = [
+        {
+          id: 'inspection',
+          title: 'Repository Inspection',
+          description: 'Cloning git ref, analyzing directory tree, detecting runtime manifests',
+          status: 'pending',
+        },
+        {
+          id: 'dependencies',
+          title: 'Dependency Installation',
+          description: `Resolving lockfiles and downloading isolated dependencies via ${formData.packageManager}`,
+          status: 'pending',
+        },
+        {
+          id: 'configuration',
+          title: 'Environment Configuration',
+          description: 'Allocating sandbox network ports, setting up cgroups and environment variables',
+          status: 'pending',
+        },
+        {
+          id: 'verification',
+          title: 'Verification',
+          description: 'Executing process start command and checking readiness health probe',
+          status: 'pending',
+        },
+      ];
+
+      const initialSteps = mapBackendStepsToPipeline(initRes.steps, basePipeline);
+      const nowTime = new Date().toTimeString().split(' ')[0];
+
+      const newSandbox: Sandbox = {
+        id: newId,
+        workflowId: newId,
+        backendSynced: true,
+        name: `${name}-${formData.branch}`,
+        repoUrl: formData.repoUrl,
+        repoOwner: owner,
+        repoName: name,
+        branch: formData.branch,
+        runtime: formData.runtime,
+        runtimeVersion: formData.runtimeVersion,
+        packageManager: formData.packageManager,
+        createdAt: 'Just now',
+        status: 'running',
+        currentStepId: 'inspection',
+        steps: initialSteps,
+        logs: [
+          {
+            id: `log-${Date.now()}-0`,
+            timestamp: nowTime,
+            level: 'info',
+            stepId: 'inspection',
+            message: `FastAPI workflow ${newId} initialized. Bootstrapping isolated sandbox for ${formData.repoUrl} @ ${formData.branch}`,
+          },
+          {
+            id: `log-${Date.now()}-1`,
+            timestamp: nowTime,
+            level: 'success',
+            stepId: 'inspection',
+            message: `Manifest validated and normalized by backend service. Project archetype: ${payload.project_type}.`,
+          },
+        ],
+        env: {
+          detectedRuntime: formData.runtimeVersion,
+          runtimeVersion: formData.runtimeVersion.replace(/[^0-9.]/g, ''),
+          packageManager: formData.packageManager,
+          detectedDependencies: payload.dependencies?.length || 24,
+          dependenciesList: payload.dependencies || [],
+          port: formData.port,
+          startCommand:
+            formData.startCommand ||
+            (formData.runtime === 'node'
+              ? `${formData.packageManager} run dev`
+              : `${formData.packageManager} run uvicorn main:app`),
+          testCommand:
+            formData.testCommand ||
+            (formData.runtime === 'node' ? `${formData.packageManager} test` : 'pytest -v'),
+          healthEndpoint: `http://127.0.0.1:${formData.port}/health`,
+          memoryMb: 2048,
+          cpuCores: 2,
+          leaseExpiresAt: 'In 60 minutes',
+        },
+        envVars:
+          formData.envVars.length > 0
+            ? formData.envVars
+            : [
+                { key: 'PORT', value: String(formData.port) },
+                { key: 'NODE_ENV', value: 'development' },
+              ],
+      };
+
+      setSandboxes((prev) => [newSandbox, ...prev]);
+      setActiveSandboxId(newId);
+      setActiveTab('overview');
+
+      // 2. Poll workflow status from FastAPI backend until completed or failed
+      const finalStatus = await sandboxApi.pollWorkflowStatus(newId, (prog) => {
+        setSandboxes((prev) =>
+          prev.map((s) => {
+            if (s.id === newId) {
+              const updatedSteps = mapBackendStepsToPipeline(prog.steps, s.steps);
+              return {
+                ...s,
+                steps: updatedSteps,
+                currentStepId:
+                  updatedSteps.find((st) => st.status === 'running')?.id || s.currentStepId,
+              };
+            }
+            return s;
+          })
+        );
+      });
+
+      // 3. Finalize sandbox state
+      const updatedSteps = mapBackendStepsToPipeline(finalStatus.steps, newSandbox.steps);
+      const isFailed = finalStatus.status === 'failed';
+
+      let errorSummary: ErrorSummary | undefined;
+      if (isFailed) {
+        const failedStep = finalStatus.steps.find((st) => st.status === 'failed');
+        errorSummary = {
+          title: 'Verification Health Check Failed',
+          message:
+            finalStatus.error_details ||
+            failedStep?.error_message ||
+            `Process started but failed readiness probes on port ${formData.port}.`,
+          step: 'verification',
+          exitCode: 1,
+          suggestedFix:
+            formData.runtime === 'python'
+              ? 'Add MOCK_DATABASE=true or use a local SQLite connection string in the Environment Variables section.'
+              : 'Verify port binding and check that all required environment variables are configured.',
+          stackTrace: failedStep?.error_message || 'Simulated health check failed.',
+        };
+      }
+
+      setSandboxes((prev) =>
+        prev.map((s) => {
+          if (s.id === newId) {
+            return {
+              ...s,
+              status: isFailed ? 'failed' : 'running',
+              steps: updatedSteps,
+              errorSummary,
+              healthStatus: isFailed
+                ? undefined
+                : {
+                    healthy: true,
+                    latencyMs: 24,
+                    statusCode: 200,
+                    checkedAt: 'Just now',
+                  },
+              previewUrl: isFailed ? undefined : `http://localhost:${formData.port}`,
+              logs: [
+                ...s.logs,
+                ...(isFailed
+                  ? [
+                      {
+                        id: `log-${Date.now()}-err`,
+                        timestamp: new Date().toTimeString().split(' ')[0],
+                        level: 'error' as const,
+                        stepId: 'verification' as const,
+                        message: finalStatus.error_details || 'Health probe failed.',
+                      },
+                    ]
+                  : [
+                      {
+                        id: `log-${Date.now()}-succ`,
+                        timestamp: new Date().toTimeString().split(' ')[0],
+                        level: 'success' as const,
+                        stepId: 'verification' as const,
+                        message: `FastAPI workflow ${newId} completed successfully! Sandbox ready at http://localhost:${formData.port}`,
+                      },
+                    ]),
+              ],
+            };
+          }
+          return s;
+        })
+      );
+
+      setApiNotification({
+        type: isFailed ? 'error' : 'success',
+        message: isFailed
+          ? `Backend workflow ${newId} finished with verification error.`
+          : `Backend workflow ${newId} bootstrapped successfully via FastAPI.`,
+      });
+      setTimeout(() => setApiNotification(null), 5000);
+    } catch (err: unknown) {
+      // Backend not running / connection failed: inform and run local simulator
+      const errMsg = (err as Error)?.message || 'Network error';
+      setApiNotification({
+        type: 'info',
+        message: `FastAPI backend at ${BACKEND_BASE_URL} unreachable (${errMsg}). Switched to local simulated runner.`,
+      });
+      setTimeout(() => setApiNotification(null), 6000);
+
+      const newId = `sbx-${Math.floor(1000 + Math.random() * 9000)}`;
+      const cancel = startSandboxSimulation({
+        sandboxId: newId,
+        name: '',
+        repoUrl: formData.repoUrl,
+        branch: formData.branch,
+        runtime: formData.runtime,
+        runtimeVersion: formData.runtimeVersion,
+        packageManager: formData.packageManager,
+        startCommand: formData.startCommand,
+        testCommand: formData.testCommand,
+        port: formData.port,
+        envVars: formData.envVars,
+        simulateFailure: formData.simulateFailure,
+        onUpdate: (updatedSandbox) => {
+          setSandboxes((prev) => {
+            const exists = prev.some((s) => s.id === updatedSandbox.id);
+            if (exists) {
+              return prev.map((s) => (s.id === updatedSandbox.id ? updatedSandbox : s));
+            }
+            return [updatedSandbox, ...prev];
+          });
+        },
+        onFinish: () => {
+          setIsBootstrapping(false);
+        },
+      });
+
+      cancelSimulationRef.current = cancel;
+      setActiveSandboxId(newId);
+      setActiveTab('overview');
+    } finally {
+      setIsBootstrapping(false);
+    }
   };
 
   // Handle Retry Sandbox
@@ -109,50 +441,26 @@ export default function App() {
       setDetailModalSandbox(null);
     }
 
-    setIsBootstrapping(true);
-    setActiveTab('overview');
+    const envVars = withSuggestedFix
+      ? [
+          ...targetSandbox.envVars,
+          { key: 'MOCK_DATABASE', value: 'true' },
+          { key: 'DATABASE_URL', value: 'sqlite:///local_test.db' },
+        ]
+      : targetSandbox.envVars;
 
-    if (cancelSimulationRef.current) {
-      cancelSimulationRef.current();
-    }
-
-    const retryId = `sbx-${Math.floor(1000 + Math.random() * 9000)}`;
-
-    const cancel = startSandboxSimulation({
-      sandboxId: retryId,
-      name: `${targetSandbox.repoName}-retry`,
+    handleCreateSandbox({
       repoUrl: targetSandbox.repoUrl,
       branch: targetSandbox.branch,
       runtime: targetSandbox.runtime,
       runtimeVersion: targetSandbox.runtimeVersion,
       packageManager: targetSandbox.packageManager,
+      port: targetSandbox.env.port,
       startCommand: targetSandbox.env.startCommand,
       testCommand: targetSandbox.env.testCommand,
-      port: targetSandbox.env.port,
-      envVars: withSuggestedFix
-        ? [
-            ...targetSandbox.envVars,
-            { key: 'MOCK_DATABASE', value: 'true' },
-            { key: 'DATABASE_URL', value: 'sqlite:///local_test.db' },
-          ]
-        : targetSandbox.envVars,
+      envVars,
       simulateFailure: withSuggestedFix ? false : targetSandbox.status === 'failed',
-      onUpdate: (updatedSandbox) => {
-        setSandboxes((prev) => {
-          const exists = prev.some((s) => s.id === updatedSandbox.id);
-          if (exists) {
-            return prev.map((s) => (s.id === updatedSandbox.id ? updatedSandbox : s));
-          }
-          return [updatedSandbox, ...prev];
-        });
-      },
-      onFinish: () => {
-        setIsBootstrapping(false);
-      },
     });
-
-    cancelSimulationRef.current = cancel;
-    setActiveSandboxId(retryId);
   };
 
   // Stop Sandbox
@@ -200,11 +508,40 @@ export default function App() {
         {/* 3. Main Header with Breadcrumb, Cluster Status, and Create Sandbox CTA */}
         <Header
           activeTab={activeTab}
-          onCreateSandboxClick={() => setActiveTab('new-sandbox')}
-          onRefresh={() => {
-            // refresh trigger
-          }}
+          backendHealth={backendHealth}
+          isRefreshing={isRefreshing}
+          onRefresh={handleRefresh}
         />
+
+        {/* API Notification Banner */}
+        {apiNotification && (
+          <div
+            className={`mx-6 mt-3 px-4 py-2.5 rounded-lg border text-xs flex items-center justify-between transition-all ${
+              apiNotification.type === 'success'
+                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                : apiNotification.type === 'error'
+                ? 'bg-rose-950/40 border-rose-500/40 text-rose-300'
+                : 'bg-violet-950/40 border-violet-500/40 text-violet-300'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {apiNotification.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : apiNotification.type === 'error' ? (
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : (
+                <Terminal className="w-4 h-4 text-violet-400 shrink-0" />
+              )}
+              <span>{apiNotification.message}</span>
+            </div>
+            <button
+              onClick={() => setApiNotification(null)}
+              className="text-neutral-400 hover:text-neutral-200 text-xs ml-3 font-mono cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         {/* Dynamic Page Views */}
         <main className="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">

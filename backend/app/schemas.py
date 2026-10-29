@@ -52,6 +52,42 @@ class ApprovalStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class StageId(str, Enum):
+    """Ordered stages in the agent workflow."""
+    INSPECTION = "inspection"
+    PLANNING = "planning"
+    APPROVAL = "approval"
+    EXECUTION = "execution"
+    VERIFICATION = "verification"
+    FINAL_RESULT = "final_result"
+
+
+class StageStatus(str, Enum):
+    """Status lifecycle of an individual high-level stage."""
+    PENDING = "pending"
+    RUNNING = "running"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
+    COMPLETED = "completed"
+    REJECTED = "rejected"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class WorkflowStageInfo(BaseModel):
+    """Structured stage item in the 6-stage live agent timeline."""
+    id: str = Field(..., description="Stage identifier (e.g. inspection, planning, approval, execution, verification, final_result).")
+    number: int = Field(..., description="Sequential stage index (1-6).")
+    title: str = Field(..., description="Display title of the stage.")
+    description: str = Field(..., description="Short explanation of what this stage accomplishes.")
+    status: StageStatus = Field(default=StageStatus.PENDING, description="Execution status.")
+    message: Optional[str] = Field(default=None, description="Human-readable live status message.")
+    started_at: Optional[datetime] = Field(default=None, description="Timestamp stage commenced.")
+    completed_at: Optional[datetime] = Field(default=None, description="Timestamp stage concluded.")
+    duration_seconds: Optional[float] = Field(default=None, description="Elapsed time in seconds.")
+    error_message: Optional[str] = Field(default=None, description="Error diagnostics if stage failed.")
+    details: Optional[Dict[str, Any]] = Field(default=None, description="Stage-specific contextual metadata.")
+
+
 class WorkflowStatus(str, Enum):
     """Overall status of a setup workflow."""
     QUEUED = "queued"
@@ -488,6 +524,12 @@ class WorkflowCreateResponse(BaseModel):
     approval_status: Optional[ApprovalStatus] = Field(default=None, description="Initial approval status.")
     plan_fingerprint: Optional[str] = Field(default=None, description="Execution plan fingerprint if plan was created.")
     execution_plan: Optional[List[Dict[str, Any]]] = Field(default=None, description="Planned execution steps.")
+    current_stage: Optional[str] = Field(default=None, description="Current active stage in the 6-stage lifecycle.")
+    current_message: Optional[str] = Field(default=None, description="Live headline message explaining what the agent is doing.")
+    progress_percentage: Optional[int] = Field(default=0, description="Overall progress percentage 0-100.")
+    completed_stages: Optional[List[str]] = Field(default_factory=list, description="IDs of completed stages.")
+    stages: Optional[List[WorkflowStageInfo]] = Field(default_factory=list, description="Structured 6-stage timeline.")
+    approval_required: Optional[bool] = Field(default=False, description="True if human approval is required.")
 
 
 class WorkflowStatusResponse(BaseModel):
@@ -506,6 +548,14 @@ class WorkflowStatusResponse(BaseModel):
     execution_plan: Optional[List[Dict[str, Any]]] = Field(default=None, description="Planned execution steps.")
     approved_at: Optional[datetime] = Field(default=None, description="Approval timestamp in UTC.")
     rejection_reason: Optional[str] = Field(default=None, description="User rejection reason if rejected.")
+    current_stage: Optional[str] = Field(default=None, description="Current active stage in the 6-stage lifecycle.")
+    current_message: Optional[str] = Field(default=None, description="Live headline message explaining what the agent is doing.")
+    progress_percentage: Optional[int] = Field(default=0, description="Overall progress percentage 0-100.")
+    completed_stages: Optional[List[str]] = Field(default_factory=list, description="IDs of completed stages.")
+    stages: Optional[List[WorkflowStageInfo]] = Field(default_factory=list, description="Structured 6-stage timeline.")
+    approval_required: Optional[bool] = Field(default=False, description="True if human approval is required.")
+    execution_steps: Optional[List[Dict[str, Any]]] = Field(default=None, description="Detailed command outputs executed in sandbox.")
+    verification_results: Optional[Dict[str, Any]] = Field(default=None, description="Readiness checks and probe results.")
 
 
 class APIErrorResponse(BaseModel):

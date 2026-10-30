@@ -2,12 +2,14 @@
 
 import asyncio
 from typing import Any, Dict, Optional
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.core.auth import AuthenticatedUser, require_admin
 from app.schemas import (
     APIErrorResponse,
     ApprovalDecisionRequest,
+    ApprovalStatus,
     ManifestDiscoveryRequest,
     ManifestDiscoveryResult,
     ValidationResult,
@@ -131,10 +133,12 @@ async def get_workflow_plan(workflow_id: str):
     "/{workflow_id}/approve",
     response_model=WorkflowStatusResponse,
     status_code=status.HTTP_200_OK,
-    summary="Approve pending execution plan",
-    description="Explicitly approve the proposed plan to resume sandbox setup execution.",
+    summary="Approve pending execution plan (Admin only)",
+    description="Explicitly approve the proposed plan to resume sandbox setup execution. Restricted to administrators.",
     responses={
-        400: {"model": APIErrorResponse, "description": "Workflow not awaiting approval"},
+        400: {"model": APIErrorResponse, "description": "Workflow not awaiting approval or ineligible"},
+        401: {"model": APIErrorResponse, "description": "Authentication required"},
+        403: {"model": APIErrorResponse, "description": "Administrator role required"},
         404: {"model": APIErrorResponse, "description": "Workflow ID not found"},
         409: {"model": APIErrorResponse, "description": "Plan fingerprint mismatch"},
     },
@@ -148,8 +152,9 @@ async def approve_workflow_plan(
     workflow_id: str,
     payload: Optional[ApprovalDecisionRequest] = None,
     background: bool = False,
+    current_user: AuthenticatedUser = Depends(require_admin),
 ):
-    """Approve execution plan and resume execution in the sandbox."""
+    """Approve execution plan and resume execution in the sandbox. Requires Administrator role."""
     decision = payload or ApprovalDecisionRequest(approved=True)
     try:
         return workflow_service.approve_workflow(
@@ -190,10 +195,12 @@ async def approve_workflow_plan(
     "/{workflow_id}/reject",
     response_model=WorkflowStatusResponse,
     status_code=status.HTTP_200_OK,
-    summary="Reject pending execution plan",
-    description="Explicitly reject the proposed plan, halting execution cleanly without running commands.",
+    summary="Reject pending execution plan (Admin only)",
+    description="Explicitly reject the proposed plan, halting execution cleanly without running commands. Restricted to administrators.",
     responses={
         400: {"model": APIErrorResponse, "description": "Workflow not awaiting approval"},
+        401: {"model": APIErrorResponse, "description": "Authentication required"},
+        403: {"model": APIErrorResponse, "description": "Administrator role required"},
         404: {"model": APIErrorResponse, "description": "Workflow ID not found"},
     },
 )
@@ -205,8 +212,9 @@ async def approve_workflow_plan(
 async def reject_workflow_plan(
     workflow_id: str,
     payload: Optional[ApprovalDecisionRequest] = None,
+    current_user: AuthenticatedUser = Depends(require_admin),
 ):
-    """Reject execution plan and halt workflow cleanly."""
+    """Reject execution plan and halt workflow cleanly. Requires Administrator role."""
     decision = payload or ApprovalDecisionRequest(approved=False)
     try:
         return workflow_service.approve_workflow(
@@ -231,6 +239,49 @@ async def reject_workflow_plan(
                 error_code="INVALID_WORKFLOW_STATE",
             ).model_dump(mode="json"),
         )
+
+
+@router.post(
+    "/{workflow_id}/execute",
+    response_model=WorkflowStatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Execute approved sandbox plan (Admin only)",
+    description="Explicitly trigger execution of an already approved plan. Fails if caller is a developer or unauthenticated.",
+    responses={
+        400: {"model": APIErrorResponse, "description": "Workflow not approved"},
+        401: {"model": APIErrorResponse, "description": "Authentication required"},
+        403: {"model": APIErrorResponse, "description": "Administrator role required"},
+        404: {"model": APIErrorResponse, "description": "Workflow ID not found"},
+    },
+)
+@router.post(
+    "/execute/{workflow_id}",
+    response_model=WorkflowStatusResponse,
+    include_in_schema=False,
+)
+async def execute_approved_plan(
+    workflow_id: str,
+    current_user: AuthenticatedUser = Depends(require_admin),
+):
+    """Execute an approved setup plan, restricted to authorized administrators."""
+    workflow = workflow_service.get_workflow(workflow_id)
+    if workflow is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=APIErrorResponse(
+                detail=f"Workflow with ID '{workflow_id}' not found.",
+                error_code="WORKFLOW_NOT_FOUND",
+            ).model_dump(mode="json"),
+        )
+    if workflow.approval_status != ApprovalStatus.APPROVED:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=APIErrorResponse(
+                detail="Workflow plan has not been approved. Execution requires prior administrator approval.",
+                error_code="PLAN_NOT_APPROVED",
+            ).model_dump(mode="json"),
+        )
+    return workflow
 
 
 @router.get(

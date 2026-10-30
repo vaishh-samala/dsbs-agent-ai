@@ -11,6 +11,7 @@ from app.services.workflow_service import workflow_service
 
 
 client = TestClient(app)
+client.headers.update({"Authorization": "Bearer admin-token", "X-User-Role": "admin"})
 
 SAMPLE_PYTHON_MANIFEST = {
     "project_name": "approval-fastapi-service",

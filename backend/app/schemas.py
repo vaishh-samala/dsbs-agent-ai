@@ -71,6 +71,7 @@ class StageStatus(str, Enum):
     REJECTED = "rejected"
     FAILED = "failed"
     SKIPPED = "skipped"
+    NEEDS_CLARIFICATION = "needs_clarification"
 
 
 class WorkflowStageInfo(BaseModel):
@@ -96,6 +97,31 @@ class WorkflowStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     REJECTED = "rejected"
+    NEEDS_CLARIFICATION = "needs_clarification"
+
+
+class AgentDecision(str, Enum):
+    """Explicit decision outcomes produced by the agent evaluation router."""
+    APPROVE_FOR_REVIEW = "APPROVE_FOR_REVIEW"
+    REJECT = "REJECT"
+    NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+
+
+class EvaluationResult(BaseModel):
+    """Structured agent evaluation result containing evidence-based analysis."""
+    decision: AgentDecision = Field(..., description="Evaluation decision: APPROVE_FOR_REVIEW, REJECT, or NEEDS_CLARIFICATION.")
+    request_summary: str = Field(..., description="Concise synopsis of the developer request.")
+    repository_findings: List[str] = Field(default_factory=list, description="Concrete evidence discovered in the repository.")
+    compatibility_issues: List[str] = Field(default_factory=list, description="Identified framework, engine, or lockfile incompatibilities.")
+    security_findings: List[str] = Field(default_factory=list, description="Security scan results, command policies, and permission assessments.")
+    validation_errors: List[str] = Field(default_factory=list, description="Blocking validation or policy errors.")
+    warnings: List[str] = Field(default_factory=list, description="Non-blocking warnings or optimization suggestions.")
+    proposed_manifest: Optional[Dict[str, Any]] = Field(default=None, description="Sanitized and normalized manifest model.")
+    proposed_commands: List[str] = Field(default_factory=list, description="Sequential sandbox commands scheduled for execution.")
+    permission_justification: Optional[str] = Field(default=None, description="Evaluation of requested sandbox permissions and scope.")
+    verification_plan: List[str] = Field(default_factory=list, description="Planned smoke probes and health assertions.")
+    reasoning_summary: str = Field(..., description="High-level reasoning narrative synthesized by LLM or deterministic engine.")
+    clarification_questions: List[str] = Field(default_factory=list, description="Specific questions if additional information is required.")
 
 
 # Valid identifier regex for project name and env var names
@@ -266,6 +292,26 @@ class SetupManifest(BaseModel):
         default=None,
         max_length=500,
         description="Optional local filesystem path to the repository for discovery.",
+    )
+    permissions: Optional[List[str]] = Field(
+        default_factory=lambda: ["read_only", "sandbox_debug"],
+        description="Requested sandbox permission scopes (e.g. read_only, sandbox_debug, full_ports).",
+    )
+    scope: Optional[str] = Field(
+        default="sandbox_debug",
+        description="Primary access scope requested by developer.",
+    )
+    network_access: Optional[str] = Field(
+        default="loopback_only",
+        description="Network isolation requirement (e.g. loopback_only, full_ports).",
+    )
+    justification: Optional[str] = Field(
+        default=None,
+        description="Developer explanation/justification for requested access or permissions.",
+    )
+    clarification_responses: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Developer answers to previous clarification questions.",
     )
 
     @field_validator("version")
@@ -511,6 +557,7 @@ class WorkflowPlanResponse(BaseModel):
     is_ready_for_approval: bool = Field(..., description="True if workflow is currently paused awaiting approval.")
     approved_at: Optional[datetime] = Field(default=None, description="Timestamp of approval if approved.")
     rejection_reason: Optional[str] = Field(default=None, description="Reason for rejection if rejected.")
+    evaluation_result: Optional[EvaluationResult] = Field(default=None, description="Structured agent evaluation result.")
 
 
 class WorkflowCreateResponse(BaseModel):
@@ -530,6 +577,7 @@ class WorkflowCreateResponse(BaseModel):
     completed_stages: Optional[List[str]] = Field(default_factory=list, description="IDs of completed stages.")
     stages: Optional[List[WorkflowStageInfo]] = Field(default_factory=list, description="Structured 6-stage timeline.")
     approval_required: Optional[bool] = Field(default=False, description="True if human approval is required.")
+    evaluation_result: Optional[EvaluationResult] = Field(default=None, description="Structured agent evaluation result.")
 
 
 class WorkflowStatusResponse(BaseModel):
@@ -554,6 +602,7 @@ class WorkflowStatusResponse(BaseModel):
     completed_stages: Optional[List[str]] = Field(default_factory=list, description="IDs of completed stages.")
     stages: Optional[List[WorkflowStageInfo]] = Field(default_factory=list, description="Structured 6-stage timeline.")
     approval_required: Optional[bool] = Field(default=False, description="True if human approval is required.")
+    evaluation_result: Optional[EvaluationResult] = Field(default=None, description="Structured agent evaluation result.")
     execution_steps: Optional[List[Dict[str, Any]]] = Field(default=None, description="Detailed command outputs executed in sandbox.")
     verification_results: Optional[Dict[str, Any]] = Field(default=None, description="Readiness checks and probe results.")
 

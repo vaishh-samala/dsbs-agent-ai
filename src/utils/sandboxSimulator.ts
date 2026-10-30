@@ -37,7 +37,6 @@ export function parseRepoDetails(url: string) {
 
 export function startSandboxSimulation(options: SimulateOptions): () => void {
   const { owner, name } = parseRepoDetails(options.repoUrl);
-  const now = new Date();
   const formatTime = () => {
     const d = new Date();
     return d.toTimeString().split(' ')[0] + '.' + String(d.getMilliseconds()).padStart(3, '0');
@@ -72,6 +71,7 @@ export function startSandboxSimulation(options: SimulateOptions): () => void {
 
   let currentSandbox: Sandbox = {
     id: options.sandboxId,
+    workflowId: options.sandboxId,
     name: options.name || `${name}-${options.branch}`,
     repoUrl: options.repoUrl,
     repoOwner: owner,
@@ -82,6 +82,9 @@ export function startSandboxSimulation(options: SimulateOptions): () => void {
     packageManager: options.packageManager,
     createdAt: 'Just now',
     status: 'running',
+    currentStage: 'inspection',
+    currentMessage: 'Agent is inspecting your repository...',
+    progressPercentage: 15,
     currentStepId: 'inspection',
     steps: initialSteps,
     logs: [
@@ -169,124 +172,286 @@ export function startSandboxSimulation(options: SimulateOptions): () => void {
       addLog('info', 'inspection', `Detected manifest: ${options.runtime === 'node' ? 'package.json, lockfile' : 'pyproject.toml, requirements.txt'}`);
       addLog('success', 'inspection', `Repository inspection complete. Target: ${options.runtimeVersion} (${options.packageManager})`);
       updateStep('inspection', 'completed', { durationMs: 920, completedAt: 'Just now' });
+
+      // STEP 2: PAUSE AT HUMAN APPROVAL GATE
+      const proposedPlan = [
+        {
+          step: 1,
+          phase: 'environment_provisioning',
+          command: `init-container --runtime ${options.runtime} --version ${options.runtimeVersion}`,
+          description: `Allocate isolated virtual container and configure ${options.runtime} ${options.runtimeVersion}`,
+          is_safe: true,
+        },
+        {
+          step: 2,
+          phase: 'dependency_resolution',
+          command: options.runtime === 'node' ? `${options.packageManager} install` : `${options.packageManager} install --no-root`,
+          description: `Resolve package lockfiles and cache dependencies using ${options.packageManager}`,
+          is_safe: true,
+        },
+      ];
+      const planFingerprint = 'sha256:' + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+
+      currentSandbox = {
+        ...currentSandbox,
+        status: 'awaiting_approval',
+        approvalStatus: 'awaiting_approval',
+        approvalRequired: true,
+        planFingerprint,
+        proposedPlan,
+        currentStage: 'approval',
+        currentMessage: 'Agent prepared execution plan. Awaiting human approval.',
+        progressPercentage: 50,
+        stages: [
+          {
+            id: 'inspection',
+            number: 1,
+            title: 'Repository Inspection',
+            description: 'Discover project files, identify the project type, inspect dependency manifests, and validate configuration.',
+            status: 'completed',
+            message: 'Repository inspection completed.',
+          },
+          {
+            id: 'planning',
+            number: 2,
+            title: 'Setup Planning',
+            description: 'Generate the ordered setup plan and proposed commands.',
+            status: 'completed',
+            message: 'Setup plan generated successfully.',
+          },
+          {
+            id: 'approval',
+            number: 3,
+            title: 'Human Approval',
+            description: 'Display the proposed commands, plan summary, and plan fingerprint.',
+            status: 'waiting_for_approval',
+            message: 'Waiting for your approval.',
+            details: {
+              plan_fingerprint: planFingerprint,
+              is_awaiting: true,
+            },
+          },
+          {
+            id: 'execution',
+            number: 4,
+            title: 'Sandbox Execution',
+            description: 'Execute approved setup commands inside simulated sandbox boundaries.',
+            status: 'pending',
+            message: 'Pending user approval.',
+          },
+          {
+            id: 'verification',
+            number: 5,
+            title: 'Environment Verification',
+            description: 'Probe service readiness and execute smoke assertions.',
+            status: 'pending',
+            message: 'Pending container execution.',
+          },
+          {
+            id: 'final_result',
+            number: 6,
+            title: 'Final Result',
+            description: 'Final container bootstrap status and diagnostics summary.',
+            status: 'pending',
+            message: 'Awaiting operator authorization.',
+          },
+        ],
+        evaluationResult: {
+          decision: 'APPROVE_FOR_REVIEW',
+          request_summary: `Bootstrap ${options.runtime} sandbox for ${options.repoUrl} @ ${options.branch}`,
+          repository_findings: [
+            `Detected runtime manifest for ${options.runtime}`,
+            `Package manager ${options.packageManager} validated against sandbox cluster rules`,
+          ],
+          compatibility_issues: [],
+          security_findings: [
+            'Standard container isolation enforced; zero host privileges',
+            'No prohibited commands detected in proposed sequence',
+          ],
+          validation_errors: [],
+          warnings: [],
+          proposed_commands: proposedPlan.map((p) => p.command),
+          permission_justification: 'Standard sandbox execution permissions: isolated rootless cgroups namespace',
+          verification_plan: [options.testCommand || (options.runtime === 'node' ? `${options.packageManager} test` : 'pytest')],
+          reasoning_summary: `Request validated and APPROVED FOR HUMAN REVIEW. Runtime ${options.runtime} ${options.runtimeVersion} is compatible, package manager ${options.packageManager} aligned with environment, and security policies passed. Setup commands are prepared for explicit reviewer sign-off. [Deterministic Rule-Based Evaluation]`,
+          clarification_questions: [],
+        },
+      };
+
+      addLog('info', 'inspection', `Execution plan prepared (${proposedPlan.length} steps). Paused at approval gate awaiting human approval.`);
+      options.onUpdate({ ...currentSandbox });
+      if (options.onFinish) {
+        options.onFinish({ ...currentSandbox });
+      }
     }, 1100)
   );
 
-  // STEP 2: Dependency Installation (1200ms - 2800ms)
+  return () => {
+    isCancelled = true;
+    timeouts.forEach(clearTimeout);
+  };
+}
+
+export function resumeSandboxSimulation(
+  sandbox: Sandbox,
+  approved: boolean,
+  reason: string | undefined,
+  onUpdate: (updated: Sandbox) => void,
+  onFinish?: (final: Sandbox) => void
+): () => void {
+  const formatTime = () => {
+    const d = new Date();
+    return d.toTimeString().split(' ')[0] + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  };
+
+  let currentSandbox = { ...sandbox };
+  let isCancelled = false;
+  const timeouts: NodeJS.Timeout[] = [];
+
+  const addLog = (level: LogEntry['level'], stepId: WorkflowStepId, message: string) => {
+    if (isCancelled) return;
+    const newLog: LogEntry = {
+      id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      timestamp: formatTime(),
+      level,
+      stepId,
+      message,
+    };
+    currentSandbox = {
+      ...currentSandbox,
+      logs: [...currentSandbox.logs, newLog],
+    };
+    onUpdate({ ...currentSandbox });
+  };
+
+  const updateStep = (stepId: WorkflowStepId, status: StepStatus, extra?: Partial<WorkflowStep>) => {
+    if (isCancelled) return;
+    currentSandbox = {
+      ...currentSandbox,
+      currentStepId: status === 'running' ? stepId : currentSandbox.currentStepId,
+      steps: currentSandbox.steps.map((s) => (s.id === stepId ? { ...s, status, ...extra } : s)),
+    };
+    onUpdate({ ...currentSandbox });
+  };
+
+  if (!approved) {
+    // REJECTION
+    currentSandbox = {
+      ...currentSandbox,
+      status: 'rejected',
+      approvalStatus: 'rejected',
+      rejectionReason: reason || 'Operator rejected setup plan.',
+      currentStage: 'approval',
+      currentMessage: 'Setup plan rejected. Execution halted.',
+      stages: (currentSandbox.stages || []).map((st) => {
+        if (st.id === 'approval') return { ...st, status: 'rejected' as const, message: reason || 'Plan rejected by user.' };
+        if (st.id === 'execution' || st.id === 'verification') return { ...st, status: 'skipped' as const, message: 'Skipped due to rejection.' };
+        if (st.id === 'final_result') return { ...st, status: 'rejected' as const, message: 'Setup rejected.' };
+        return st;
+      }),
+    };
+    addLog('warn', 'inspection', `Execution plan rejected: ${reason || 'User rejected execution plan.'}. Execution cancelled.`);
+    onUpdate({ ...currentSandbox });
+    if (onFinish) onFinish({ ...currentSandbox });
+    return () => {};
+  }
+
+  // APPROVED: RESUME EXECUTION
+  currentSandbox = {
+    ...currentSandbox,
+    status: 'running',
+    approvalStatus: 'approved',
+    currentStage: 'execution',
+    currentMessage: 'Agent is executing approved setup commands...',
+    progressPercentage: 65,
+    stages: (currentSandbox.stages || []).map((st) => {
+      if (st.id === 'approval') return { ...st, status: 'completed' as const, message: 'Plan authorized by user.' };
+      if (st.id === 'execution') return { ...st, status: 'running' as const, message: 'Agent is executing the approved setup plan...' };
+      return st;
+    }),
+  };
+  addLog('success', 'dependencies', 'Setup plan authorized. Resuming container execution.');
+  onUpdate({ ...currentSandbox });
+
+  // Execution Step 2: Dependencies
   timeouts.push(
     setTimeout(() => {
       if (isCancelled) return;
       updateStep('dependencies', 'running', { startedAt: 'Just now' });
-      addLog('info', 'dependencies', `Running package installation: ${options.packageManager} install`);
-      addLog('stdout', 'dependencies', `Fetching package metadata from registry mirror...\nResolving dependencies tree...`);
-    }, 1300)
+      addLog('info', 'dependencies', `Running package installation: ${currentSandbox.packageManager} install`);
+      addLog('stdout', 'dependencies', `Resolving lockfiles and downloading isolated dependencies...`);
+    }, 300)
   );
 
   timeouts.push(
     setTimeout(() => {
       if (isCancelled) return;
-      if (options.runtime === 'node') {
-        addLog('stdout', 'dependencies', `Lockfile up to date. Downloaded 36 tarballs in 1.1s. Verified checksums with SHA-512.`);
-      } else {
-        addLog('stdout', 'dependencies', `Collecting wheel cache: fastapi (0.111.0), uvicorn (0.29.0), pydantic (2.7.1). Installed 22 packages.`);
-      }
       addLog('success', 'dependencies', `Dependencies installed cleanly with 0 security advisories.`);
-      updateStep('dependencies', 'completed', { durationMs: 1650, completedAt: 'Just now' });
-    }, 2800)
-  );
+      updateStep('dependencies', 'completed', { durationMs: 950, completedAt: 'Just now' });
 
-  // STEP 3: Environment Configuration (3000ms - 4200ms)
-  timeouts.push(
-    setTimeout(() => {
-      if (isCancelled) return;
+      // Step 3: Configuration
       updateStep('configuration', 'running', { startedAt: 'Just now' });
       addLog('info', 'configuration', `Configuring virtual cgroups container (2 Cores, 2048 MB RAM)`);
-      addLog('info', 'configuration', `Injecting ${options.envVars.length || 2} environment variables: ${options.envVars.map(v => v.key).join(', ') || 'PORT, NODE_ENV'}`);
       addLog('info', 'configuration', `Allocated port ${currentSandbox.env.port} on virtual bridge tap0`);
-    }, 3000)
+    }, 1100)
   );
 
   timeouts.push(
     setTimeout(() => {
       if (isCancelled) return;
       addLog('success', 'configuration', `Environment configuration successfully provisioned.`);
-      updateStep('configuration', 'completed', { durationMs: 1180, completedAt: 'Just now' });
-    }, 4200)
-  );
+      updateStep('configuration', 'completed', { durationMs: 780, completedAt: 'Just now' });
 
-  // STEP 4: Verification (4400ms - 6000ms)
-  timeouts.push(
-    setTimeout(() => {
-      if (isCancelled) return;
+      // Step 4: Verification
+      currentSandbox = {
+        ...currentSandbox,
+        currentStage: 'verification',
+        currentMessage: 'Agent is verifying the environment...',
+        progressPercentage: 85,
+        stages: (currentSandbox.stages || []).map((st) => {
+          if (st.id === 'execution') return { ...st, status: 'completed' as const, message: 'Approved setup commands executed.' };
+          if (st.id === 'verification') return { ...st, status: 'running' as const, message: 'Probing readiness and health...' };
+          return st;
+        }),
+      };
       updateStep('verification', 'running', { startedAt: 'Just now' });
       addLog('info', 'verification', `Executing start command: ${currentSandbox.env.startCommand}`);
-      addLog('stdout', 'verification', `Starting process in PID namespace 4821...\nReady on http://localhost:${currentSandbox.env.port}`);
       addLog('info', 'verification', `Sending HTTP probe GET ${currentSandbox.env.healthEndpoint}`);
-    }, 4400)
+      onUpdate({ ...currentSandbox });
+    }, 1900)
   );
 
   timeouts.push(
     setTimeout(() => {
       if (isCancelled) return;
+      addLog('success', 'verification', `HTTP probe response 200 OK received in 38ms`);
+      addLog('success', 'verification', `Sandbox verified and live! Ready for developer testing.`);
 
-      if (options.simulateFailure) {
-        // SIMULATED FAILURE
-        addLog('error', 'verification', `Health probe timeout: Connection refused on port ${currentSandbox.env.port}`);
-        addLog('error', 'verification', `Worker process terminated with non-zero exit code 1`);
-        addLog('error', 'verification', `Error: Missing required database socket connection at 127.0.0.1:5432`);
+      updateStep('verification', 'completed', { durationMs: 820, completedAt: 'Just now' });
 
-        const errorSummary: ErrorSummary = {
-          title: 'Verification Health Check Failed',
-          message: `The sandbox process started but failed readiness probes on port ${currentSandbox.env.port}. The service requires an external backing service that was not configured.`,
-          step: 'verification',
-          exitCode: 1,
-          suggestedFix: 'Add MOCK_DATABASE=true or use a local SQLite connection string in the Environment Variables section.',
-          stackTrace: `Error: connect ECONNREFUSED 127.0.0.1:5432
-    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1494:16)
-    at verifyReadinessProbe (/sandbox/runner.js:84:12)
-    at async bootstrapSandbox (/sandbox/runner.js:142:5)`,
-        };
+      currentSandbox = {
+        ...currentSandbox,
+        status: 'running',
+        currentStage: 'completed',
+        currentMessage: 'Setup completed successfully',
+        progressPercentage: 100,
+        previewUrl: `http://localhost:${currentSandbox.env.port}`,
+        healthStatus: {
+          healthy: true,
+          latencyMs: 38,
+          statusCode: 200,
+          checkedAt: 'Just now',
+        },
+        stages: (currentSandbox.stages || []).map((st) => {
+          if (st.id === 'verification') return { ...st, status: 'completed' as const, message: 'Readiness check passed.' };
+          if (st.id === 'final_result') return { ...st, status: 'completed' as const, message: 'Setup completed successfully.' };
+          return st;
+        }),
+      };
 
-        updateStep('verification', 'failed', {
-          durationMs: 2400,
-          completedAt: 'Just now',
-          error: errorSummary.message,
-        });
-
-        currentSandbox = {
-          ...currentSandbox,
-          status: 'failed',
-          errorSummary,
-        };
-      } else {
-        // SIMULATED SUCCESS
-        addLog('success', 'verification', `HTTP probe response 200 OK received in 42ms`);
-        addLog('success', 'verification', `Running automated smoke tests: 4/4 assertions passed`);
-        addLog('success', 'verification', `Sandbox verified and live! Ready for developer testing.`);
-
-        updateStep('verification', 'completed', {
-          durationMs: 1850,
-          completedAt: 'Just now',
-        });
-
-        currentSandbox = {
-          ...currentSandbox,
-          status: 'running',
-          previewUrl: `http://localhost:${currentSandbox.env.port}`,
-          healthStatus: {
-            healthy: true,
-            latencyMs: 42,
-            statusCode: 200,
-            checkedAt: 'Just now',
-          },
-        };
-      }
-
-      options.onUpdate({ ...currentSandbox });
-      if (options.onFinish) {
-        options.onFinish({ ...currentSandbox });
-      }
-    }, 6200)
+      onUpdate({ ...currentSandbox });
+      if (onFinish) onFinish({ ...currentSandbox });
+    }, 2800)
   );
 
   return () => {

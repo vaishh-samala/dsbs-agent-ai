@@ -174,6 +174,8 @@ export const LiveWorkflowTimeline: React.FC<LiveWorkflowTimelineProps> = ({
       liveHeadline = 'Waiting for human approval';
     } else if (sandbox.status === 'rejected') {
       liveHeadline = 'Setup rejected';
+    } else if (sandbox.status === 'needs_clarification') {
+      liveHeadline = 'Additional information required';
     } else if (sandbox.status === 'failed') {
       liveHeadline = 'Setup failed';
     } else if (sandbox.status === 'success' || (sandbox.status === 'running' && sandbox.steps.every((s) => s.status === 'completed'))) {

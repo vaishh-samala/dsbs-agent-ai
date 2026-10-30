@@ -10,6 +10,7 @@ from app.services.workflow_service import workflow_service
 
 
 client = TestClient(app)
+client.headers.update({"Authorization": "Bearer admin-token", "X-User-Role": "admin"})
 
 SAMPLE_MANIFEST = {
     "project_name": "live-progress-fastapi",

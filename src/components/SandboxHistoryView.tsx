@@ -17,7 +17,7 @@ import {
   ChevronRight,
   Terminal,
 } from 'lucide-react';
-import { Sandbox, SandboxStatus } from '../types/sandbox';
+import { Sandbox, SandboxStatus, UserRole } from '../types/sandbox';
 
 interface SandboxHistoryViewProps {
   sandboxes: Sandbox[];
@@ -28,6 +28,7 @@ interface SandboxHistoryViewProps {
   onOpenPreview: (sandbox: Sandbox) => void;
   initialFilter?: string;
   isRetrying?: boolean;
+  role?: UserRole;
 }
 
 export const SandboxHistoryView: React.FC<SandboxHistoryViewProps> = ({
@@ -39,6 +40,7 @@ export const SandboxHistoryView: React.FC<SandboxHistoryViewProps> = ({
   onOpenPreview,
   initialFilter = 'all',
   isRetrying = false,
+  role = 'developer',
 }) => {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>(initialFilter);
@@ -221,6 +223,29 @@ export const SandboxHistoryView: React.FC<SandboxHistoryViewProps> = ({
                     >
                       <Power className="w-3.5 h-3.5" />
                       <span>Stop</span>
+                    </button>
+                  )}
+
+                  {sbx.status === 'awaiting_approval' && (
+                    <button
+                      onClick={() => onSelectSandbox(sbx)}
+                      className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                        role === 'admin'
+                          ? 'bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 shadow-sm shadow-amber-950/40'
+                          : 'bg-[#141a26] hover:bg-[#1a2233] border border-[#232c3d] text-neutral-300'
+                      }`}
+                    >
+                      {role === 'admin' ? (
+                        <>
+                          <Clock className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Authorize Plan</span>
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-3.5 h-3.5 text-amber-400" />
+                          <span>View Status</span>
+                        </>
+                      )}
                     </button>
                   )}
 

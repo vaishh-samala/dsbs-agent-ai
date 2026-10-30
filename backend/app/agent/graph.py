@@ -113,6 +113,14 @@ def run_sandbox_agent(
         "rejection_reason": None,
         "plan_fingerprint": "",
         "approved_plan_fingerprint": None,
+        "evaluation_result": None,
+        "agent_decision": None,
+        "repository_findings": [],
+        "compatibility_issues": [],
+        "security_findings": [],
+        "clarification_questions": [],
+        "permission_assessment": None,
+        "reasoning_summary": None,
     }
 
     invoke_res = sandbox_agent.invoke(initial_state, config=config)

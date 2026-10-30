@@ -17,7 +17,7 @@ import {
   Server,
   Terminal,
 } from 'lucide-react';
-import { Sandbox, SandboxStatus } from '../types/sandbox';
+import { Sandbox, SandboxStatus, UserRole } from '../types/sandbox';
 
 interface DeveloperOverviewProps {
   sandboxes: Sandbox[];
@@ -29,6 +29,7 @@ interface DeveloperOverviewProps {
   onStopSandbox: (id: string) => void;
   onViewAllHistory: () => void;
   isRetrying?: boolean;
+  role?: UserRole;
 }
 
 export const DeveloperOverview: React.FC<DeveloperOverviewProps> = ({
@@ -41,6 +42,7 @@ export const DeveloperOverview: React.FC<DeveloperOverviewProps> = ({
   onStopSandbox,
   onViewAllHistory,
   isRetrying = false,
+  role = 'developer',
 }) => {
   const total = sandboxes.length;
   const running = sandboxes.filter((s) => s.status === 'running').length;
@@ -213,7 +215,9 @@ export const DeveloperOverview: React.FC<DeveloperOverviewProps> = ({
                 {latestSandbox.status === 'awaiting_approval' && (
                   <span className="text-amber-400 flex items-center gap-1.5">
                     <Clock className="w-3.5 h-3.5" />
-                    Agent generated setup plan. Awaiting your approval before executing commands.
+                    {role === 'admin'
+                      ? 'Agent generated setup plan. Awaiting your approval before executing commands.'
+                      : 'Agent generated setup plan. Awaiting administrator review and approval before execution.'}
                   </span>
                 )}
                 {latestSandbox.status === 'running' && (
@@ -253,10 +257,23 @@ export const DeveloperOverview: React.FC<DeveloperOverviewProps> = ({
               {latestSandbox.status === 'awaiting_approval' && (
                 <button
                   onClick={() => onSelectSandbox(latestSandbox)}
-                  className="px-3.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all"
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all ${
+                    role === 'admin'
+                      ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 shadow-sm'
+                      : 'bg-[#141a26] hover:bg-[#1a2233] text-neutral-200 border border-[#232c3d]'
+                  }`}
                 >
-                  <Clock className="w-3.5 h-3.5" />
-                  <span>Review & Authorize Plan</span>
+                  {role === 'admin' ? (
+                    <>
+                      <Clock className="w-3.5 h-3.5" />
+                      <span>Review & Authorize Plan</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-3.5 h-3.5 text-amber-400" />
+                      <span>View Plan & Status</span>
+                    </>
+                  )}
                 </button>
               )}
 

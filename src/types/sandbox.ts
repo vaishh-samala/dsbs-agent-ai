@@ -2,9 +2,27 @@ export type RuntimeType = 'node' | 'python';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'pip' | 'poetry' | 'uv';
 
-export type SandboxStatus = 'queued' | 'running' | 'awaiting_approval' | 'rejected' | 'success' | 'failed' | 'stopped';
+export type SandboxStatus = 'queued' | 'running' | 'awaiting_approval' | 'needs_clarification' | 'rejected' | 'success' | 'failed' | 'stopped';
 
-export type ApprovalStatus = 'awaiting_approval' | 'approved' | 'rejected';
+export type ApprovalStatus = 'awaiting_approval' | 'approved' | 'rejected' | 'needs_clarification';
+
+export type AgentDecision = 'APPROVE_FOR_REVIEW' | 'REJECT' | 'NEEDS_CLARIFICATION';
+
+export interface EvaluationResult {
+  decision: AgentDecision;
+  request_summary: string;
+  repository_findings: string[];
+  compatibility_issues: string[];
+  security_findings: string[];
+  validation_errors: string[];
+  warnings: string[];
+  proposed_manifest?: Record<string, any> | null;
+  proposed_commands: string[];
+  permission_justification?: string | null;
+  verification_plan: string[];
+  reasoning_summary: string;
+  clarification_questions: string[];
+}
 
 export type StageId =
   | 'inspection'
@@ -126,6 +144,7 @@ export interface AccessRequest {
   startCommand?: string;
   testCommand?: string;
   warnings?: string[];
+  evaluationResult?: EvaluationResult;
 }
 
 export interface DeveloperUser {
@@ -199,6 +218,7 @@ export interface Sandbox {
     healthy: boolean;
     checks: string[];
   };
+  evaluationResult?: EvaluationResult;
 }
 
 export type UserRole = 'developer' | 'admin';

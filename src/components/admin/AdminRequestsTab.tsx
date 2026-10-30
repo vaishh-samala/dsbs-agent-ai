@@ -451,6 +451,30 @@ export const AdminRequestsTab: React.FC<AdminRequestsTabProps> = ({
                           </div>
                         </div>
 
+                        {/* Agent Evaluation & Intelligence Assessment */}
+                        {(matchingSandbox?.evaluationResult || req.evaluationResult) && (
+                          <div className="p-3 rounded-lg bg-[#0e1422] border border-violet-500/30 space-y-2 text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="font-semibold text-violet-300 flex items-center gap-1.5">
+                                <ShieldCheck className="w-3.5 h-3.5 text-violet-400" />
+                                Agent Intelligence Evaluation
+                              </span>
+                              <span
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded border font-semibold ${
+                                  (matchingSandbox?.evaluationResult || req.evaluationResult)?.decision === 'APPROVE_FOR_REVIEW'
+                                    ? 'bg-emerald-950 text-emerald-300 border-emerald-500/30'
+                                    : 'bg-amber-950 text-amber-300 border-amber-500/30'
+                                }`}
+                              >
+                                {(matchingSandbox?.evaluationResult || req.evaluationResult)?.decision}
+                              </span>
+                            </div>
+                            <p className="text-neutral-300 font-sans text-[11px] leading-relaxed">
+                              {(matchingSandbox?.evaluationResult || req.evaluationResult)?.reasoning_summary}
+                            </p>
+                          </div>
+                        )}
+
                         {/* Proposed Commands Table */}
                         <div className="space-y-2">
                           <span className="text-[10px] text-neutral-400 uppercase tracking-wider block">

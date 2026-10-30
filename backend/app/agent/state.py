@@ -46,3 +46,11 @@ class SandboxAgentState(TypedDict, total=False):
     rejection_reason: Optional[str]
     plan_fingerprint: str
     approved_plan_fingerprint: Optional[str]
+    evaluation_result: Optional[Dict[str, Any]]
+    agent_decision: Optional[str]  # "APPROVE_FOR_REVIEW", "REJECT", "NEEDS_CLARIFICATION"
+    repository_findings: Optional[List[str]]
+    compatibility_issues: Optional[List[str]]
+    security_findings: Optional[List[str]]
+    clarification_questions: Optional[List[str]]
+    permission_assessment: Optional[Dict[str, Any]]
+    reasoning_summary: Optional[str]

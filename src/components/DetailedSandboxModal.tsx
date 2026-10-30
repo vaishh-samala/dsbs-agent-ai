@@ -27,7 +27,7 @@ import {
   ArrowRight,
   Info,
 } from 'lucide-react';
-import { Sandbox, WorkflowStepId, LogEntry, PlannedExecutionStep } from '../types/sandbox';
+import { Sandbox, WorkflowStepId, LogEntry, PlannedExecutionStep, UserRole } from '../types/sandbox';
 
 interface DetailedSandboxModalProps {
   sandbox: Sandbox;
@@ -37,6 +37,8 @@ interface DetailedSandboxModalProps {
   onApprove?: (sandbox: Sandbox) => void;
   onReject?: (sandbox: Sandbox, reason?: string) => void;
   isApproving?: boolean;
+  role?: UserRole;
+  onResubmitClarification?: (sandbox: Sandbox) => void;
 }
 
 export interface RecordedStage {
@@ -59,6 +61,8 @@ export const DetailedSandboxModal: React.FC<DetailedSandboxModalProps> = ({
   onApprove,
   onReject,
   isApproving = false,
+  role = 'developer',
+  onResubmitClarification,
 }) => {
   const [activeTab, setActiveTab] = useState<'workflow' | 'environment' | 'manifest' | 'logs'>('workflow');
   const [copiedFix, setCopiedFix] = useState(false);
@@ -566,8 +570,121 @@ pytest = "^8.2.0"`;
           {activeTab === 'workflow' && (
             <div className="space-y-5 max-w-4xl mx-auto">
               
-              {/* Human Approval Gate Section */}
-              {isAwaitingApproval && onApprove && onReject && (
+              {/* ========================================================= */}
+              {/* DEVELOPER ROLE: READ-ONLY STATUS PANEL                    */}
+              {/* ========================================================= */}
+              {isAwaitingApproval && role === 'developer' && (
+                <div className="p-4 sm:p-5 rounded-xl bg-[#0e121a] border border-[#232c3d] space-y-4 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#1b2130]">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-1.5 rounded-lg bg-amber-500/15 text-amber-400">
+                        <Clock className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-xs font-bold text-neutral-100 uppercase tracking-wider">
+                          Setup Plan Awaiting Administrator Approval
+                        </h3>
+                        <p className="text-[11px] text-neutral-400 mt-0.5">
+                          The AI agent has inspected your repository, evaluated the configuration, and prepared a setup plan. Your request is awaiting administrator review. No setup commands will execute until an administrator approves the plan.
+                        </p>
+                      </div>
+                    </div>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-mono font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/25 shrink-0">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                      <span>Pending Administrator Review</span>
+                    </span>
+                  </div>
+
+                  {/* Metadata and Governance Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+                    <div className="p-2.5 rounded-lg bg-[#090b10] border border-[#1b2130]">
+                      <div className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans">Workflow Stage</div>
+                      <div className="text-neutral-200 font-semibold mt-0.5">Stage 3: Approval</div>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-[#090b10] border border-[#1b2130]">
+                      <div className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans">Agent Decision</div>
+                      <div className="text-emerald-400 font-semibold mt-0.5 flex items-center gap-1">
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>{sandbox.evaluationResult?.decision || 'APPROVED FOR REVIEW'}</span>
+                      </div>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-[#090b10] border border-[#1b2130]">
+                      <div className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans">Inspection & Archetype</div>
+                      <div className="text-neutral-200 truncate mt-0.5">{manifestFileName} · {sandbox.runtimeVersion}</div>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-[#090b10] border border-[#1b2130]">
+                      <div className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans">Port & Permissions</div>
+                      <div className="text-neutral-200 mt-0.5">Port :{sandbox.env.port} · {sandbox.requestedScope || 'sandbox_debug'}</div>
+                    </div>
+                  </div>
+
+                  {/* Plan Fingerprint */}
+                  {sandbox.planFingerprint && (
+                    <div className="flex items-center gap-2 text-xs font-mono bg-[#090b10] p-2.5 rounded-lg border border-[#1b2130]">
+                      <span className="text-neutral-500">Plan Fingerprint:</span>
+                      <code className="text-violet-300 font-bold truncate flex-1">{sandbox.planFingerprint}</code>
+                      <button
+                        onClick={handleCopyFingerprint}
+                        className="text-neutral-400 hover:text-neutral-200 transition-colors cursor-pointer"
+                        title="Copy Fingerprint"
+                      >
+                        {copiedFingerprint ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Proposed commands list (Read-Only) */}
+                  {sandbox.proposedPlan && sandbox.proposedPlan.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider">
+                        Proposed Setup Commands (Scheduled For Execution Upon Administrator Sign-off):
+                      </span>
+                      <div className="bg-[#090b10] rounded-lg p-2.5 border border-[#1b2130] space-y-1.5 font-mono text-xs">
+                        {sandbox.proposedPlan.map((step) => (
+                          <div key={step.step} className="flex items-center gap-2 text-neutral-300">
+                            <span className="text-neutral-500">#{step.step}</span>
+                            <span className="px-1.5 py-0.2 rounded bg-neutral-800 text-[10px] uppercase text-neutral-400">
+                              {step.phase}
+                            </span>
+                            <code className="text-emerald-300 flex-1">{step.command}</code>
+                            {step.is_safe && (
+                              <span className="text-[10px] text-emerald-400/80 font-sans">verified safe</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Validation warnings / issues if any */}
+                  {sandbox.evaluationResult?.warnings && sandbox.evaluationResult.warnings.length > 0 && (
+                    <div className="p-3 rounded-lg bg-amber-950/20 border border-amber-500/30 text-xs text-amber-300 space-y-1">
+                      <div className="font-semibold flex items-center gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        <span>Evaluation Warnings:</span>
+                      </div>
+                      <ul className="list-disc list-inside space-y-0.5 text-amber-200/80 text-[11px]">
+                        {sandbox.evaluationResult.warnings.map((w, idx) => (
+                          <li key={idx}>{w}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Zero host privileges security policy reminder */}
+                  <div className="p-2.5 rounded-lg bg-[#141a26] border border-[#222a3a] text-xs text-neutral-400 flex items-center gap-2">
+                    <Lock className="w-4 h-4 text-violet-400 shrink-0" />
+                    <span>
+                      <strong>Policy Enforcement:</strong> Zero host execution privileges. Setup commands will remain halted until an authorized cluster administrator approves the plan.
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* ========================================================= */}
+              {/* ADMINISTRATOR ROLE: ACTIONABLE APPROVAL GATE              */}
+              {/* ========================================================= */}
+              {isAwaitingApproval && role === 'admin' && onApprove && onReject && (
                 <div className="p-4 sm:p-5 rounded-xl bg-amber-950/20 border border-amber-500/40 space-y-3.5 shadow-lg">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -678,7 +795,7 @@ pytest = "^8.2.0"`;
 
                     <button
                       onClick={() => onApprove(sandbox)}
-                      disabled={isApproving}
+                      disabled={isApproving || sandbox.evaluationResult?.decision === 'REJECT' || sandbox.evaluationResult?.decision === 'NEEDS_CLARIFICATION'}
                       className="px-4 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold shadow-md flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
                     >
                       {isApproving ? (
@@ -694,6 +811,195 @@ pytest = "^8.2.0"`;
                       )}
                     </button>
                   </div>
+                </div>
+              )}
+
+              {/* ========================================================= */}
+              {/* REJECTION STATUS PANEL (WHEN PLAN WAS REJECTED)           */}
+              {/* ========================================================= */}
+              {(sandbox.status === 'rejected' || sandbox.approvalStatus === 'rejected') && (
+                <div className="p-4 sm:p-5 rounded-xl bg-rose-950/20 border border-rose-500/40 space-y-3 shadow-md">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-rose-300 font-bold text-xs uppercase tracking-wider">
+                      <XCircle className="w-4 h-4 text-rose-400" />
+                      <span>Setup Plan Rejected by Administrator</span>
+                    </div>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-950 text-rose-400 border border-rose-800">
+                      Execution Halted
+                    </span>
+                  </div>
+                  <div className="text-xs text-neutral-300 space-y-1 leading-relaxed">
+                    <p>
+                      The proposed setup plan was reviewed and declined by a cluster administrator. In adherence to cluster security boundaries, no commands were executed (0 commands run).
+                    </p>
+                    {sandbox.rejectionReason && (
+                      <div className="p-2.5 rounded-lg bg-[#0e121a] border border-rose-900/40 text-xs font-mono text-rose-200 mt-2">
+                        <span className="text-neutral-400 font-sans font-medium">Administrator's Recorded Reason: </span>
+                        <span>{sandbox.rejectionReason}</span>
+                      </div>
+                    )}
+                  </div>
+                  {onResubmitClarification && (
+                    <div className="pt-2 flex justify-end">
+                      <button
+                        onClick={() => onResubmitClarification(sandbox)}
+                        className="px-3.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium cursor-pointer transition-colors"
+                      >
+                        Revise & Resubmit Request...
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ========================================================= */}
+              {/* CLARIFICATION REQUIRED PANEL (WHEN QUESTIONS PENDING)     */}
+              {/* ========================================================= */}
+              {(sandbox.evaluationResult?.decision === 'NEEDS_CLARIFICATION' || sandbox.currentStage === 'clarification') && (
+                <div className="p-4 sm:p-5 rounded-xl bg-amber-950/20 border border-amber-500/40 space-y-3 shadow-md">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-amber-300 font-bold text-xs uppercase tracking-wider">
+                      <AlertTriangle className="w-4 h-4 text-amber-400" />
+                      <span>Additional Information Required by AI Agent</span>
+                    </div>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800">
+                      Needs Clarification
+                    </span>
+                  </div>
+                  <div className="text-xs text-neutral-300 space-y-1.5 leading-relaxed">
+                    <p>
+                      The agent detected ambiguous project specifications or missing dependencies. Please provide the requested details to formulate a valid setup plan:
+                    </p>
+                    {sandbox.evaluationResult?.clarification_questions && sandbox.evaluationResult.clarification_questions.length > 0 && (
+                      <ul className="list-disc list-inside space-y-1 text-amber-200/90 font-mono text-xs bg-[#0e121a] p-2.5 rounded-lg border border-[#1e2433]">
+                        {sandbox.evaluationResult.clarification_questions.map((q, idx) => (
+                          <li key={idx}>{q}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  {onResubmitClarification && (
+                    <div className="pt-2 flex justify-end">
+                      <button
+                        onClick={() => onResubmitClarification(sandbox)}
+                        className="px-3.5 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold cursor-pointer transition-colors shadow-sm"
+                      >
+                        Provide Clarifications & Resubmit...
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Agent Evaluation & Intelligence Assessment Card */}
+              {sandbox.evaluationResult && (
+                <div className="p-4 sm:p-5 rounded-xl bg-[#0f1422] border border-violet-500/30 space-y-3.5 shadow-lg">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-violet-400 shrink-0" />
+                      <h3 className="text-xs font-bold text-violet-200 uppercase tracking-wider">
+                        Agent Decision & Evaluation Analysis
+                      </h3>
+                    </div>
+                    {/* Decision Badge */}
+                    <span
+                      className={`text-[10px] font-mono px-2.5 py-0.5 rounded-full border font-semibold ${
+                        sandbox.evaluationResult.decision === 'APPROVE_FOR_REVIEW'
+                          ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/40'
+                          : sandbox.evaluationResult.decision === 'NEEDS_CLARIFICATION'
+                          ? 'bg-amber-950/80 text-amber-300 border-amber-500/40'
+                          : 'bg-rose-950/80 text-rose-300 border-rose-500/40'
+                      }`}
+                    >
+                      Decision: {sandbox.evaluationResult.decision.replace(/_/g, ' ')}
+                    </span>
+                  </div>
+
+                  {/* Reasoning Summary */}
+                  <div className="text-xs text-neutral-300 leading-relaxed font-sans bg-[#0a0d14] p-3 rounded-lg border border-[#1e2433]">
+                    <div className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-violet-400" />
+                      Agent Reasoning Summary:
+                    </div>
+                    <p>{sandbox.evaluationResult.reasoning_summary}</p>
+                  </div>
+
+                  {/* Repository Findings & Security Assessment Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    {/* Repository Evidence */}
+                    <div className="bg-[#0a0d14] p-3 rounded-lg border border-[#1e2433] space-y-1.5">
+                      <span className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider block">
+                        Repository Evidence:
+                      </span>
+                      {sandbox.evaluationResult.repository_findings && sandbox.evaluationResult.repository_findings.length > 0 ? (
+                        <ul className="space-y-1 text-neutral-300 text-[11px]">
+                          {sandbox.evaluationResult.repository_findings.map((f, i) => (
+                            <li key={i} className="flex items-start gap-1.5">
+                              <span className="text-violet-400">•</span>
+                              <span>{f}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-neutral-500 text-[11px]">No repository evidence recorded</span>
+                      )}
+                    </div>
+
+                    {/* Security & Sandbox Policy */}
+                    <div className="bg-[#0a0d14] p-3 rounded-lg border border-[#1e2433] space-y-1.5">
+                      <span className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider block">
+                        Sandbox Security Policy:
+                      </span>
+                      {sandbox.evaluationResult.security_findings && sandbox.evaluationResult.security_findings.length > 0 ? (
+                        <ul className="space-y-1 text-neutral-300 text-[11px]">
+                          {sandbox.evaluationResult.security_findings.map((s, i) => (
+                            <li key={i} className="flex items-start gap-1.5">
+                              <span className="text-emerald-400">✓</span>
+                              <span>{s}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-neutral-500 text-[11px]">Rootless sandbox isolation enforced</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Clarification Questions (if any) */}
+                  {sandbox.evaluationResult.clarification_questions && sandbox.evaluationResult.clarification_questions.length > 0 && (
+                    <div className="bg-amber-950/20 border border-amber-500/30 p-3 rounded-lg space-y-1.5 text-xs">
+                      <span className="text-[11px] font-mono text-amber-300 uppercase tracking-wider block font-semibold">
+                        Clarification Required:
+                      </span>
+                      <ul className="space-y-1 text-amber-200/90 text-[11px]">
+                        {sandbox.evaluationResult.clarification_questions.map((q, i) => (
+                          <li key={i} className="flex items-start gap-1.5">
+                            <span className="text-amber-400">?</span>
+                            <span>{q}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Warnings or Compatibility Issues (if any) */}
+                  {((sandbox.evaluationResult.warnings && sandbox.evaluationResult.warnings.length > 0) ||
+                    (sandbox.evaluationResult.compatibility_issues && sandbox.evaluationResult.compatibility_issues.length > 0)) && (
+                    <div className="bg-amber-950/10 border border-amber-500/20 p-2.5 rounded-lg space-y-1 text-[11px]">
+                      {sandbox.evaluationResult.compatibility_issues?.map((c, i) => (
+                        <div key={`comp-${i}`} className="text-amber-300/90 flex items-center gap-1.5">
+                          <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
+                          <span>{c}</span>
+                        </div>
+                      ))}
+                      {sandbox.evaluationResult.warnings?.map((w, i) => (
+                        <div key={`warn-${i}`} className="text-neutral-400 flex items-center gap-1.5">
+                          <Info className="w-3 h-3 text-neutral-400 shrink-0" />
+                          <span>{w}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 

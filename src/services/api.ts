@@ -4,7 +4,9 @@
  * Base URL defaults to http://127.0.0.1:8000 (configurable via VITE_API_BASE_URL).
  */
 
-import { WorkflowStageInfo } from '../types/sandbox';
+import { WorkflowStageInfo, EvaluationResult, AgentDecision } from '../types/sandbox';
+
+export type { EvaluationResult, AgentDecision };
 
 export type BackendProjectType =
   | 'node_app'
@@ -38,12 +40,14 @@ export type BackendWorkflowStatus =
   | 'awaiting_approval'
   | 'completed'
   | 'failed'
-  | 'rejected';
+  | 'rejected'
+  | 'needs_clarification';
 
 export type BackendApprovalStatus =
   | 'awaiting_approval'
   | 'approved'
-  | 'rejected';
+  | 'rejected'
+  | 'needs_clarification';
 
 export interface PlannedStep {
   step: number;
@@ -73,6 +77,7 @@ export interface WorkflowPlanResponse {
   is_ready_for_approval: boolean;
   approved_at?: string | null;
   rejection_reason?: string | null;
+  evaluation_result?: EvaluationResult | null;
 }
 
 /** Setup manifest matching backend SetupManifest schema (extra="forbid") */
@@ -145,6 +150,7 @@ export interface WorkflowCreateResponse {
   completed_stages?: string[] | null;
   stages?: WorkflowStageInfo[] | null;
   approval_required?: boolean | null;
+  evaluation_result?: EvaluationResult | null;
 }
 
 export interface WorkflowManifestSummary {
@@ -178,6 +184,7 @@ export interface WorkflowStatusResponse {
   completed_stages?: string[] | null;
   stages?: WorkflowStageInfo[] | null;
   approval_required?: boolean | null;
+  evaluation_result?: EvaluationResult | null;
   execution_steps?: Array<{
     command: string;
     exit_code: number;
@@ -231,6 +238,16 @@ export const BACKEND_BASE_URL =
 
 const API_V1_PREFIX = '/api/v1';
 
+let currentApiUserRole: 'developer' | 'admin' = 'developer';
+
+export function setApiUserRole(role: 'developer' | 'admin') {
+  currentApiUserRole = role;
+}
+
+export function getApiUserRole(): 'developer' | 'admin' {
+  return currentApiUserRole;
+}
+
 async function parseErrorResponse(res: Response): Promise<ApiError> {
   try {
     const errorJson: APIErrorResponse = await res.json();
@@ -269,6 +286,8 @@ async function request<T>(
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        Authorization: `Bearer ${currentApiUserRole}-token`,
+        'X-User-Role': currentApiUserRole,
         ...(options.headers || {}),
       },
     });
@@ -398,6 +417,19 @@ export const sandboxApi = {
         plan_fingerprint: planFingerprint,
       }),
     });
+  },
+
+  /**
+   * Explicitly trigger execution of an already approved plan (Admin only)
+   * POST /api/v1/sandbox/{workflow_id}/execute
+   */
+  async executeWorkflow(workflowId: string): Promise<WorkflowStatusResponse> {
+    return request<WorkflowStatusResponse>(
+      `${API_V1_PREFIX}/sandbox/${encodeURIComponent(workflowId)}/execute`,
+      {
+        method: 'POST',
+      }
+    );
   },
 
   /**

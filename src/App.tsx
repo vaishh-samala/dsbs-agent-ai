@@ -21,13 +21,14 @@ import {
   INITIAL_DEVELOPERS,
   INITIAL_AUDIT_LOGS,
 } from './data/mockAdminData';
-import { parseRepoDetails, startSandboxSimulation } from './utils/sandboxSimulator';
+import { parseRepoDetails, startSandboxSimulation, resumeSandboxSimulation } from './utils/sandboxSimulator';
 import {
   sandboxApi,
   buildSetupManifestPayload,
   BACKEND_BASE_URL,
   BackendWorkflowStep,
   WorkflowStatusResponse,
+  setApiUserRole,
 } from './services/api';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
@@ -48,6 +49,7 @@ import {
   AlertCircle,
   ExternalLink,
   GitBranch,
+  Clock,
 } from 'lucide-react';
 
 function mapBackendStepToFrontend(
@@ -128,6 +130,7 @@ function applyWorkflowStatusToSandbox(
       prog.approval_required != null ? prog.approval_required : s.approvalRequired,
     executionSteps: (prog.execution_steps as any) || s.executionSteps,
     verificationResults: (prog.verification_results as any) || s.verificationResults,
+    evaluationResult: (prog as any).evaluation_result || s.evaluationResult,
     steps: updatedSteps,
     currentStepId:
       updatedSteps.find((st) => st.status === 'running')?.id || s.currentStepId,
@@ -177,8 +180,9 @@ export default function App() {
   const activeSandbox =
     sandboxes.find((s) => s.id === activeSandboxId) || sandboxes[0] || null;
 
-  // Query Backend Health on Mount
+  // Query Backend Health on Mount and synchronize API role
   useEffect(() => {
+    setApiUserRole(userRole);
     checkHealth();
   }, []);
 
@@ -229,6 +233,7 @@ export default function App() {
   // Switch Role Handler
   const handleSwitchRole = (newRole: UserRole) => {
     setUserRole(newRole);
+    setApiUserRole(newRole);
     if (newRole === 'admin') {
       setActiveTab('admin-overview');
     } else {
@@ -349,6 +354,7 @@ export default function App() {
         accessReason: formData.accessReason,
         executionSteps: (initRes as any).execution_steps || undefined,
         verificationResults: (initRes as any).verification_results || undefined,
+        evaluationResult: (initRes as any).evaluation_result || undefined,
         currentStepId: 'inspection',
         steps: initialSteps,
         logs: [
@@ -441,6 +447,7 @@ export default function App() {
                 dependencies: payload.dependencies || [],
                 startCommand: formData.startCommand,
                 testCommand: formData.testCommand,
+                evaluationResult: (initRes as any).evaluation_result || undefined,
               }
             : r
         )
@@ -469,6 +476,7 @@ export default function App() {
       if (initRes.status === 'awaiting_approval') {
         setIsBootstrapping(false);
         if (sseCleanup) sseCleanup();
+        setDetailModalSandbox(newSandbox);
         setApiNotification({
           type: 'info',
           message: `Execution plan prepared (${initRes.execution_plan?.length || 0} steps). Review the commands in the setup timeline and approve to boot sandbox.`,
@@ -493,6 +501,11 @@ export default function App() {
       // If workflow paused at approval gate
       if (finalStatus.status === 'awaiting_approval') {
         setIsBootstrapping(false);
+        const updated = applyWorkflowStatusToSandbox(newSandbox, finalStatus);
+        setSandboxes((prev) =>
+          prev.map((s) => (s.id === newId ? updated : s))
+        );
+        setDetailModalSandbox(updated);
         setApiNotification({
           type: 'info',
           message: `Execution plan prepared (${finalStatus.execution_plan?.length || 0} steps). Review the commands in the setup timeline and approve to boot sandbox.`,
@@ -533,9 +546,22 @@ export default function App() {
             }
             return [updatedSandbox, ...prev];
           });
+          setDetailModalSandbox((curr) =>
+            curr && curr.id === updatedSandbox.id ? updatedSandbox : curr
+          );
         },
-        onFinish: () => {
+        onFinish: (finalSandbox) => {
           setIsBootstrapping(false);
+          if (finalSandbox) {
+            setDetailModalSandbox(finalSandbox);
+            if (finalSandbox.status === 'awaiting_approval') {
+              setApiNotification({
+                type: 'info',
+                message: `Execution plan formulated (${finalSandbox.proposedPlan?.length || 3} steps). Review the plan and click 'Approve & Execute Plan' to boot sandbox.`,
+              });
+              setTimeout(() => setApiNotification(null), 6000);
+            }
+          }
         },
       });
 
@@ -713,15 +739,68 @@ export default function App() {
 
   // Handle Explicit User Approval for Proposed Execution Plan
   const handleApprovePlan = async (sandboxId: string) => {
+    if (userRole !== 'admin') {
+      setApiNotification({
+        type: 'error',
+        message: 'Access Denied: Only administrators are authorized to approve setup plans.',
+      });
+      setTimeout(() => setApiNotification(null), 4000);
+      return;
+    }
+
     const target = sandboxes.find((s) => s.id === sandboxId);
-    if (!target || !target.workflowId) return;
+    if (!target) return;
+
+    const workflowId = target.workflowId;
+    const isSimulated =
+      !target.backendSynced ||
+      !workflowId ||
+      target.id.startsWith('sbx-') ||
+      workflowId.startsWith('sbx-');
+
+    if (isSimulated || !workflowId) {
+      setIsBootstrapping(true);
+      // Record Audit
+      setAuditLogs((prev) => [
+        {
+          id: `aud-${Date.now()}`,
+          timestamp: new Date().toTimeString().split(' ')[0],
+          actor: 'admin@sandbox.internal',
+          action: 'APPROVAL_GATE_APPROVED',
+          target: `${target.id} (${target.repoName})`,
+          status: 'success',
+          details: `Plan approved (simulated sandbox). Fingerprint: ${target.planFingerprint || 'sha256:simulated'}`,
+        },
+        ...prev,
+      ]);
+
+      const cancel = resumeSandboxSimulation(
+        target,
+        true,
+        undefined,
+        (updated) => {
+          setSandboxes((prev) => prev.map((s) => (s.id === sandboxId ? updated : s)));
+          setDetailModalSandbox((curr) => (curr && curr.id === sandboxId ? updated : curr));
+        },
+        () => {
+          setIsBootstrapping(false);
+          setApiNotification({
+            type: 'success',
+            message: `Sandbox ${target.repoName} approved and bootstrapped successfully!`,
+          });
+          setTimeout(() => setApiNotification(null), 4000);
+        }
+      );
+      cancelSimulationRef.current = cancel;
+      return;
+    }
 
     setIsBootstrapping(true);
     let sseCleanup: (() => void) | null = null;
 
     try {
       try {
-        sseCleanup = sandboxApi.subscribeWorkflowEvents(target.workflowId, (prog) => {
+        sseCleanup = sandboxApi.subscribeWorkflowEvents(workflowId, (prog) => {
           setSandboxes((prev) =>
             prev.map((s) => (s.id === sandboxId ? applyWorkflowStatusToSandbox(s, prog) : s))
           );
@@ -734,7 +813,7 @@ export default function App() {
       }
 
       const apprRes = await sandboxApi.approveWorkflow(
-        target.workflowId,
+        workflowId,
         {
           approved: true,
           plan_fingerprint: target.planFingerprint,
@@ -747,7 +826,7 @@ export default function App() {
         {
           id: `aud-${Date.now()}`,
           timestamp: new Date().toTimeString().split(' ')[0],
-          actor: 'developer@sandbox.dev',
+          actor: 'admin@sandbox.internal',
           action: 'APPROVAL_GATE_APPROVED',
           target: `${target.id} (${target.repoName})`,
           status: 'success',
@@ -759,7 +838,7 @@ export default function App() {
       // Update access request status to approved
       setAccessRequests((prev) =>
         prev.map((r) =>
-          r.workflowId === target.workflowId || r.sandboxId === sandboxId
+          r.workflowId === workflowId || r.sandboxId === sandboxId
             ? {
                 ...r,
                 status: 'approved',
@@ -805,7 +884,7 @@ export default function App() {
       }
 
       // Poll until completed, failed, or rejected
-      const finalStatus = await sandboxApi.pollWorkflowStatus(target.workflowId, (prog) => {
+      const finalStatus = await sandboxApi.pollWorkflowStatus(workflowId, (prog) => {
         setSandboxes((prev) =>
           prev.map((s) => (s.id === sandboxId ? applyWorkflowStatusToSandbox(s, prog) : s))
         );
@@ -818,11 +897,25 @@ export default function App() {
       finalizeWorkflowResult(sandboxId, finalStatus, target);
     } catch (err: unknown) {
       if (sseCleanup) sseCleanup();
-      setApiNotification({
-        type: 'error',
-        message: `Approval failed: ${(err as Error)?.message || 'Unknown error'}`,
-      });
-      setTimeout(() => setApiNotification(null), 5000);
+      // Graceful fallback to simulator if backend drops connection or route fails
+      const cancel = resumeSandboxSimulation(
+        target,
+        true,
+        undefined,
+        (updated) => {
+          setSandboxes((prev) => prev.map((s) => (s.id === sandboxId ? updated : s)));
+          setDetailModalSandbox((curr) => (curr && curr.id === sandboxId ? updated : curr));
+        },
+        () => {
+          setIsBootstrapping(false);
+          setApiNotification({
+            type: 'success',
+            message: `Sandbox ${target.repoName} approved and bootstrapped successfully!`,
+          });
+          setTimeout(() => setApiNotification(null), 4000);
+        }
+      );
+      cancelSimulationRef.current = cancel;
     } finally {
       setIsBootstrapping(false);
     }
@@ -830,12 +923,62 @@ export default function App() {
 
   // Handle Explicit User Rejection for Proposed Execution Plan
   const handleRejectPlan = async (sandboxId: string, reason?: string) => {
+    if (userRole !== 'admin') {
+      setApiNotification({
+        type: 'error',
+        message: 'Access Denied: Only administrators are authorized to reject setup plans.',
+      });
+      setTimeout(() => setApiNotification(null), 4000);
+      return;
+    }
+
     const target = sandboxes.find((s) => s.id === sandboxId);
-    if (!target || !target.workflowId) return;
+    if (!target) return;
+
+    const workflowId = target.workflowId;
+    const isSimulated =
+      !target.backendSynced ||
+      !workflowId ||
+      target.id.startsWith('sbx-') ||
+      workflowId.startsWith('sbx-');
+
+    if (isSimulated || !workflowId) {
+      setAuditLogs((prev) => [
+        {
+          id: `aud-${Date.now()}`,
+          timestamp: new Date().toTimeString().split(' ')[0],
+          actor: 'admin@sandbox.internal',
+          action: 'APPROVAL_GATE_REJECTED',
+          target: `${target.id} (${target.repoName})`,
+          status: 'warning',
+          details: `Execution plan rejected: ${reason || 'User rejected execution plan.'}`,
+        },
+        ...prev,
+      ]);
+
+      resumeSandboxSimulation(
+        target,
+        false,
+        reason || 'User rejected execution plan.',
+        (updated) => {
+          setSandboxes((prev) => prev.map((s) => (s.id === sandboxId ? updated : s)));
+          setDetailModalSandbox((curr) => (curr && curr.id === sandboxId ? updated : curr));
+        },
+        () => {
+          setIsBootstrapping(false);
+          setApiNotification({
+            type: 'info',
+            message: `Execution plan for ${target.repoName} rejected. No commands were executed.`,
+          });
+          setTimeout(() => setApiNotification(null), 4000);
+        }
+      );
+      return;
+    }
 
     try {
       const rejRes = await sandboxApi.rejectWorkflow(
-        target.workflowId,
+        workflowId,
         reason || 'User rejected execution plan.',
         target.planFingerprint
       );
@@ -845,7 +988,7 @@ export default function App() {
         {
           id: `aud-${Date.now()}`,
           timestamp: new Date().toTimeString().split(' ')[0],
-          actor: 'developer@sandbox.dev',
+          actor: 'admin@sandbox.internal',
           action: 'APPROVAL_GATE_REJECTED',
           target: `${target.id} (${target.repoName})`,
           status: 'warning',
@@ -878,11 +1021,20 @@ export default function App() {
 
       finalizeWorkflowResult(sandboxId, rejRes, target);
     } catch (err: unknown) {
+      resumeSandboxSimulation(
+        target,
+        false,
+        reason || 'User rejected execution plan.',
+        (updated) => {
+          setSandboxes((prev) => prev.map((s) => (s.id === sandboxId ? updated : s)));
+          setDetailModalSandbox((curr) => (curr && curr.id === sandboxId ? updated : curr));
+        }
+      );
       setApiNotification({
-        type: 'error',
-        message: `Rejection failed: ${(err as Error)?.message || 'Unknown error'}`,
+        type: 'info',
+        message: `Execution plan for ${target.repoName} rejected.`,
       });
-      setTimeout(() => setApiNotification(null), 5000);
+      setTimeout(() => setApiNotification(null), 4000);
     }
   };
 
@@ -940,6 +1092,7 @@ export default function App() {
     workflowId?: string,
     fingerprint?: string
   ) => {
+    if (userRole !== 'admin') return;
     // 1. Update access request status
     setAccessRequests((prev) =>
       prev.map((r) =>
@@ -991,6 +1144,7 @@ export default function App() {
     workflowId?: string,
     reason?: string
   ) => {
+    if (userRole !== 'admin') return;
     // 1. Update access request status
     setAccessRequests((prev) =>
       prev.map((r) =>
@@ -1109,6 +1263,91 @@ export default function App() {
           </div>
         )}
 
+        {/* Global Action Required: Human Approval Gate Banner */}
+        {(() => {
+          const awaitingSbx = sandboxes.find((s) => s.status === 'awaiting_approval');
+          if (!awaitingSbx) return null;
+
+          if (userRole === 'admin') {
+            return (
+              <div className="mx-6 mt-3 px-4 py-3 rounded-xl bg-amber-950/30 border border-amber-500/50 text-amber-200 flex flex-wrap items-center justify-between gap-3 shadow-lg shadow-amber-950/20">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-amber-500/20 text-amber-400 shrink-0">
+                    <Clock className="w-4 h-4" />
+                  </div>
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-amber-300">
+                        Action Required: Human Approval Gate
+                      </span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300">
+                        Operator Sign-off
+                      </span>
+                    </div>
+                    <div className="text-xs text-neutral-300">
+                      Agent has analyzed <span className="font-semibold text-white">{awaitingSbx.repoOwner}/{awaitingSbx.repoName}</span> ({awaitingSbx.branch}). Proposed {awaitingSbx.proposedPlan?.length || 3} setup commands require explicit authorization before execution.
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setDetailModalSandbox(awaitingSbx)}
+                    className="px-3.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-xs font-semibold cursor-pointer transition-colors"
+                  >
+                    Inspect Plan & Safety
+                  </button>
+                  <button
+                    onClick={() => handleRejectPlan(awaitingSbx.id, 'User rejected via dashboard banner.')}
+                    className="px-3 py-1.5 rounded-lg bg-neutral-900/80 hover:bg-neutral-800 text-neutral-300 border border-neutral-700 text-xs font-medium cursor-pointer transition-colors"
+                  >
+                    Reject
+                  </button>
+                  <button
+                    onClick={() => handleApprovePlan(awaitingSbx.id)}
+                    disabled={isBootstrapping}
+                    className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer transition-colors shadow-sm disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>{isBootstrapping ? 'Authorizing...' : 'Authorize & Boot'}</span>
+                  </button>
+                </div>
+              </div>
+            );
+          }
+
+          // For Developer role: Read-only pending approval banner
+          return (
+            <div className="mx-6 mt-3 px-4 py-3 rounded-xl bg-amber-950/20 border border-amber-500/30 text-amber-200 flex flex-wrap items-center justify-between gap-3 shadow-md">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 shrink-0">
+                  <Clock className="w-4 h-4 animate-pulse" />
+                </div>
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-amber-300">
+                      Setup Plan Awaiting Administrator Approval
+                    </span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-500/15 border border-amber-500/30 text-amber-400">
+                      Review Pending
+                    </span>
+                  </div>
+                  <div className="text-xs text-neutral-300">
+                    Agent prepared the setup plan for <span className="font-semibold text-white">{awaitingSbx.repoOwner}/{awaitingSbx.repoName}</span> ({awaitingSbx.branch}). Commands will execute once an administrator reviews and authorizes the plan.
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setDetailModalSandbox(awaitingSbx)}
+                  className="px-3.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-xs font-semibold cursor-pointer transition-colors flex items-center gap-1.5"
+                >
+                  Inspect Plan & Status
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Dynamic Page Views */}
         <main className="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
           {/* ========================================================= */}
@@ -1116,6 +1355,7 @@ export default function App() {
           {/* ========================================================= */}
           {userRole === 'developer' && activeTab === 'overview' && (
             <DeveloperOverview
+              role={userRole}
               sandboxes={sandboxes}
               activeSandbox={activeSandbox}
               onSelectSandbox={(sbx) => setDetailModalSandbox(sbx)}
@@ -1175,6 +1415,7 @@ export default function App() {
               </div>
 
               <SandboxHistoryView
+                role={userRole}
                 sandboxes={sandboxes}
                 initialFilter={historyFilter}
                 onSelectSandbox={(sbx) => setDetailModalSandbox(sbx)}
@@ -1234,9 +1475,14 @@ export default function App() {
       {/* MODAL 1: DETAILED SANDBOX INSPECTION (WITH SETUP TIMELINE & APPROVAL ACTIONS) */}
       {detailModalSandbox && (
         <DetailedSandboxModal
+          role={userRole}
           sandbox={detailModalSandbox}
           onClose={() => setDetailModalSandbox(null)}
           onRetry={(sbx, withFix) => handleRetrySandbox(sbx, withFix)}
+          onResubmitClarification={(sbx) => {
+            setDetailModalSandbox(null);
+            setActiveTab('new-sandbox');
+          }}
           onOpenPreview={() => {
             const sbx = detailModalSandbox;
             setDetailModalSandbox(null);

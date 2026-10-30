@@ -38,13 +38,24 @@ def create_application() -> FastAPI:
     @app.exception_handler(HTTPException)
     async def custom_http_exception_handler(request: Request, exc: HTTPException):
         detail_msg = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-        error_code = f"HTTP_{exc.status_code}"
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            error_code = "UNAUTHORIZED"
+        elif exc.status_code == status.HTTP_403_FORBIDDEN:
+            error_code = "FORBIDDEN"
+        elif exc.status_code == status.HTTP_404_NOT_FOUND:
+            error_code = "NOT_FOUND"
+        elif exc.status_code == status.HTTP_409_CONFLICT:
+            error_code = "CONFLICT"
+        else:
+            error_code = f"HTTP_{exc.status_code}"
+
         return JSONResponse(
             status_code=exc.status_code,
             content=APIErrorResponse(
                 detail=detail_msg,
                 error_code=error_code,
             ).model_dump(mode="json"),
+            headers=exc.headers,
         )
 
     # Global handler for RequestValidationError to guarantee APIErrorResponse schema consistency
@@ -69,6 +80,7 @@ def create_application() -> FastAPI:
 
     # Include route modules
     app.include_router(health.router)
+    app.include_router(health.router, prefix=settings.API_V1_PREFIX)
     app.include_router(sandbox.router, prefix=settings.API_V1_PREFIX)
 
     return app

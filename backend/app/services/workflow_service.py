@@ -117,7 +117,10 @@ class WorkflowRecord:
         if agent_status == "completed":
             self.final_status = WorkflowStatus.COMPLETED
             self.current_stage = "completed"
-        elif agent_status == "rejected" or approval_status_str == "rejected":
+        elif agent_status == "needs_clarification" or self.agent_state.get("agent_decision") == "NEEDS_CLARIFICATION":
+            self.final_status = WorkflowStatus.NEEDS_CLARIFICATION
+            self.current_stage = "clarification"
+        elif agent_status == "rejected" or approval_status_str == "rejected" or self.agent_state.get("agent_decision") == "REJECT":
             self.final_status = WorkflowStatus.REJECTED
             self.current_stage = "rejected"
         elif agent_status == "failed":
@@ -195,6 +198,8 @@ class WorkflowRecord:
             return "Setup completed successfully"
         if self.final_status == WorkflowStatus.REJECTED:
             return "Setup rejected"
+        if self.final_status == WorkflowStatus.NEEDS_CLARIFICATION:
+            return "Additional information required"
         if self.final_status == WorkflowStatus.FAILED:
             return "Setup failed"
         if self.final_status == WorkflowStatus.AWAITING_APPROVAL:
@@ -547,6 +552,7 @@ class WorkflowRecord:
             completed_stages=completed_stage_ids,
             stages=stages_info,
             approval_required=self.final_status == WorkflowStatus.AWAITING_APPROVAL,
+            evaluation_result=self.agent_state.get("evaluation_result"),
         )
 
     def to_status_response(self) -> WorkflowStatusResponse:
@@ -612,6 +618,7 @@ class WorkflowRecord:
             approval_required=is_approval_required,
             execution_steps=self.agent_state.get("execution_logs"),
             verification_results=ver_results,
+            evaluation_result=self.agent_state.get("evaluation_result"),
         )
 
     def to_plan_response(self) -> WorkflowPlanResponse:
@@ -642,6 +649,7 @@ class WorkflowRecord:
             is_ready_for_approval=self.final_status == WorkflowStatus.AWAITING_APPROVAL,
             approved_at=appr_dt,
             rejection_reason=self.agent_state.get("rejection_reason"),
+            evaluation_result=self.agent_state.get("evaluation_result"),
         )
 
 
@@ -757,6 +765,13 @@ class WorkflowService:
             expected_fingerprint = record.agent_state.get("plan_fingerprint")
             if plan_fingerprint and expected_fingerprint and plan_fingerprint != expected_fingerprint:
                 raise ValueError("Plan fingerprint mismatch. The proposed plan was altered.")
+
+            # Reject cannot approve ineligible plans (e.g. REJECT or NEEDS_CLARIFICATION)
+            agent_decision = record.agent_state.get("agent_decision")
+            if approved and agent_decision in ["REJECT", "NEEDS_CLARIFICATION"]:
+                raise ValueError(
+                    f"Cannot approve workflow with agent decision '{agent_decision}'. The plan is ineligible for execution."
+                )
 
             if not approved:
                 # Immediate rejection

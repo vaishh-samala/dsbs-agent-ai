@@ -1,40 +1,53 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   ActiveNavTab,
+  AdminNavTab,
   ErrorSummary,
   PackageManager,
   RuntimeType,
   Sandbox,
+  SandboxStatus,
   StepStatus,
+  UserRole,
   WorkflowStep,
   WorkflowStepId,
+  AccessRequest,
+  DeveloperUser,
+  AuditActivityEvent,
 } from './types/sandbox';
 import { INITIAL_MOCK_SANDBOXES } from './data/mockSandboxes';
+import {
+  INITIAL_ACCESS_REQUESTS,
+  INITIAL_DEVELOPERS,
+  INITIAL_AUDIT_LOGS,
+} from './data/mockAdminData';
 import { parseRepoDetails, startSandboxSimulation } from './utils/sandboxSimulator';
 import {
   sandboxApi,
   buildSetupManifestPayload,
   BACKEND_BASE_URL,
   BackendWorkflowStep,
+  WorkflowStatusResponse,
 } from './services/api';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
-import { OverviewCards } from './components/OverviewCards';
-import { RepositoryForm } from './components/RepositoryForm';
-import { ActivityPanel } from './components/ActivityPanel';
-import { EnvironmentDetails } from './components/EnvironmentDetails';
+import { DeveloperOverview } from './components/DeveloperOverview';
+import { RepositoryForm, SandboxFormData } from './components/RepositoryForm';
 import { DetailedSandboxModal } from './components/DetailedSandboxModal';
 import { SandboxHistoryView } from './components/SandboxHistoryView';
 import { SettingsView } from './components/SettingsView';
 import { MockPreviewModal } from './components/MockPreviewModal';
+import { SupportedRuntimesView } from './components/SupportedRuntimesView';
+import { AdminWorkspace } from './components/admin/AdminWorkspace';
+import { DemoLoginModal } from './components/DemoLoginModal';
 import {
   Github,
   RotateCcw,
   Terminal,
   CheckCircle2,
   AlertCircle,
-  ShieldCheck,
-  XCircle,
+  ExternalLink,
+  GitBranch,
 } from 'lucide-react';
 
 function mapBackendStepToFrontend(
@@ -83,12 +96,61 @@ function mapBackendStepsToPipeline(
   });
 }
 
+function applyWorkflowStatusToSandbox(
+  s: Sandbox,
+  prog: WorkflowStatusResponse
+): Sandbox {
+  const updatedSteps = mapBackendStepsToPipeline(prog.steps || [], s.steps);
+  const status: SandboxStatus =
+    prog.status === 'awaiting_approval'
+      ? 'awaiting_approval'
+      : prog.status === 'completed'
+      ? 'running'
+      : prog.status === 'rejected'
+      ? 'rejected'
+      : prog.status === 'failed'
+      ? 'failed'
+      : 'running';
+
+  return {
+    ...s,
+    status,
+    approvalStatus: prog.approval_status || s.approvalStatus,
+    planFingerprint: prog.plan_fingerprint || s.planFingerprint,
+    proposedPlan: (prog.execution_plan as any) || s.proposedPlan,
+    rejectionReason: prog.rejection_reason || s.rejectionReason,
+    currentStage: prog.current_stage || s.currentStage,
+    currentMessage: prog.current_message || s.currentMessage,
+    progressPercentage:
+      prog.progress_percentage != null ? prog.progress_percentage : s.progressPercentage,
+    stages: prog.stages || s.stages,
+    approvalRequired:
+      prog.approval_required != null ? prog.approval_required : s.approvalRequired,
+    executionSteps: (prog.execution_steps as any) || s.executionSteps,
+    verificationResults: (prog.verification_results as any) || s.verificationResults,
+    steps: updatedSteps,
+    currentStepId:
+      updatedSteps.find((st) => st.status === 'running')?.id || s.currentStepId,
+  };
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveNavTab>('overview');
+  // Demo Role and Navigation State
+  const [userRole, setUserRole] = useState<UserRole>('developer');
+  const [activeTab, setActiveTab] = useState<ActiveNavTab | AdminNavTab>('overview');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isDemoLoginModalOpen, setIsDemoLoginModalOpen] = useState(false);
+
+  // Sandboxes State
   const [sandboxes, setSandboxes] = useState<Sandbox[]>(INITIAL_MOCK_SANDBOXES);
   const [activeSandboxId, setActiveSandboxId] = useState<string>(INITIAL_MOCK_SANDBOXES[0].id);
   const [isBootstrapping, setIsBootstrapping] = useState(false);
   const [historyFilter, setHistoryFilter] = useState<string>('all');
+
+  // Administrator Workspace State
+  const [accessRequests, setAccessRequests] = useState<AccessRequest[]>(INITIAL_ACCESS_REQUESTS);
+  const [developers, setDevelopers] = useState<DeveloperUser[]>(INITIAL_DEVELOPERS);
+  const [auditLogs, setAuditLogs] = useState<AuditActivityEvent[]>(INITIAL_AUDIT_LOGS);
 
   // Backend Health and API Status
   const [backendHealth, setBackendHealth] = useState<{
@@ -140,16 +202,8 @@ export default function App() {
         setSandboxes((prev) =>
           prev.map((s) => {
             if (s.id === activeSandbox.id) {
-              const updatedSteps = mapBackendStepsToPipeline(statusRes.steps, s.steps);
               return {
-                ...s,
-                status:
-                  statusRes.status === 'completed'
-                    ? 'running'
-                    : statusRes.status === 'failed'
-                    ? 'failed'
-                    : 'running',
-                steps: updatedSteps,
+                ...applyWorkflowStatusToSandbox(s, statusRes),
                 backendSynced: true,
               };
             }
@@ -172,6 +226,16 @@ export default function App() {
     setIsRefreshing(false);
   };
 
+  // Switch Role Handler
+  const handleSwitchRole = (newRole: UserRole) => {
+    setUserRole(newRole);
+    if (newRole === 'admin') {
+      setActiveTab('admin-overview');
+    } else {
+      setActiveTab('overview');
+    }
+  };
+
   // Cleanup simulation on unmount
   useEffect(() => {
     return () => {
@@ -181,19 +245,9 @@ export default function App() {
     };
   }, []);
 
-  // Handle Form Submission / Start Simulation with Backend Setup & Polling
-  const handleCreateSandbox = async (formData: {
-    repoUrl: string;
-    branch: string;
-    runtime: RuntimeType;
-    runtimeVersion: string;
-    packageManager: PackageManager;
-    port: number;
-    startCommand?: string;
-    testCommand?: string;
-    envVars: { key: string; value: string }[];
-    simulateFailure: boolean;
-  }) => {
+  // Handle Form Submission / Start Sandbox Setup
+  // CRITICAL REQUIREMENT: "When the developer clicks Create Sandbox, open a dedicated, full-page Agent Workflow screen. Do not redirect to Overview."
+  const handleCreateSandbox = async (formData: SandboxFormData) => {
     setIsBootstrapping(true);
 
     // Cancel any ongoing fallback simulation
@@ -203,11 +257,38 @@ export default function App() {
     }
 
     const { owner, name } = parseRepoDetails(formData.repoUrl);
-    const payload = buildSetupManifestPayload(formData);
+    const payload = buildSetupManifestPayload({
+      repoUrl: formData.repoUrl,
+      branch: formData.branch,
+      runtime: formData.runtime,
+      runtimeVersion: formData.runtimeVersion,
+      packageManager: formData.packageManager,
+      port: formData.port,
+      startCommand: formData.startCommand,
+      testCommand: formData.testCommand,
+      envVars: formData.envVars,
+      simulateFailure: formData.simulateFailure,
+    });
+
+    // Record access request in admin data
+    const newReqId = `req-${Math.floor(100 + Math.random() * 900)}`;
+    const newAccessReq: AccessRequest = {
+      id: newReqId,
+      repoUrl: formData.repoUrl,
+      repoName: name,
+      branch: formData.branch,
+      developerName: 'Developer Demo User',
+      developerEmail: 'developer@sandbox.dev',
+      scope: formData.requestedScope,
+      reason: formData.accessReason,
+      status: 'pending',
+      requestedAt: 'Just now',
+    };
+    setAccessRequests((prev) => [newAccessReq, ...prev]);
 
     try {
-      // 1. Submit setup workflow to FastAPI backend
-      const initRes = await sandboxApi.createSandboxSetup(payload);
+      // 1. Submit setup workflow to FastAPI backend (background execution for real-time progress)
+      const initRes = await sandboxApi.createSandboxSetup(payload, { background: true });
       const newId = initRes.workflow_id;
 
       const basePipeline: WorkflowStep[] = [
@@ -254,9 +335,20 @@ export default function App() {
         packageManager: formData.packageManager,
         createdAt: 'Just now',
         status: initRes.status === 'awaiting_approval' ? 'awaiting_approval' : 'running',
-        approvalStatus: initRes.approval_status || (initRes.status === 'awaiting_approval' ? 'awaiting_approval' : undefined),
+        approvalStatus:
+          initRes.approval_status ||
+          (initRes.status === 'awaiting_approval' ? 'awaiting_approval' : undefined),
         planFingerprint: initRes.plan_fingerprint || undefined,
         proposedPlan: (initRes.execution_plan as any) || undefined,
+        currentStage: initRes.current_stage || 'inspection',
+        currentMessage: initRes.current_message || 'Agent is inspecting your repository...',
+        progressPercentage: initRes.progress_percentage ?? 5,
+        stages: initRes.stages || [],
+        approvalRequired: initRes.approval_required ?? undefined,
+        requestedScope: formData.requestedScope,
+        accessReason: formData.accessReason,
+        executionSteps: (initRes as any).execution_steps || undefined,
+        verificationResults: (initRes as any).verification_results || undefined,
         currentStepId: 'inspection',
         steps: initialSteps,
         logs: [
@@ -317,35 +409,96 @@ export default function App() {
 
       setSandboxes((prev) => [newSandbox, ...prev]);
       setActiveSandboxId(newId);
-      setActiveTab('overview');
 
-      // If workflow is awaiting approval, stop here and prompt user to approve
+      // Record Audit Log
+      setAuditLogs((prev) => [
+        {
+          id: `aud-${Date.now()}`,
+          timestamp: nowTime,
+          actor: 'developer@sandbox.dev',
+          action: 'WORKFLOW_INITIALIZED',
+          target: `${newId} (${name})`,
+          status: 'info',
+          details: `Requested ${formData.requestedScope} scope. Initialized LangGraph agent workflow.`,
+        },
+        ...prev,
+      ]);
+
+      // Attach real workflow metadata to access request for admin visibility
+      setAccessRequests((prev) =>
+        prev.map((r) =>
+          r.id === newReqId
+            ? {
+                ...r,
+                workflowId: newId,
+                sandboxId: newId,
+                runtime: formData.runtime,
+                runtimeVersion: formData.runtimeVersion,
+                packageManager: formData.packageManager,
+                proposedPlan: (initRes.execution_plan as any) || undefined,
+                planFingerprint: initRes.plan_fingerprint || undefined,
+                manifestFileName: formData.runtime === 'node' ? 'package.json' : 'pyproject.toml',
+                dependencies: payload.dependencies || [],
+                startCommand: formData.startCommand,
+                testCommand: formData.testCommand,
+              }
+            : r
+        )
+      );
+
+      // Navigate to Sandbox History and inspect recorded setup timeline
+      setActiveTab('history');
+      setDetailModalSandbox(newSandbox);
+
+      // Set up SSE subscription with polling fallback
+      let sseCleanup: (() => void) | null = null;
+      try {
+        sseCleanup = sandboxApi.subscribeWorkflowEvents(newId, (prog) => {
+          setSandboxes((prev) =>
+            prev.map((s) => (s.id === newId ? applyWorkflowStatusToSandbox(s, prog) : s))
+          );
+          setDetailModalSandbox((curr) =>
+            curr && curr.id === newId ? applyWorkflowStatusToSandbox(curr, prog) : curr
+          );
+        });
+      } catch (e) {
+        console.warn('SSE subscription failed, falling back to polling', e);
+      }
+
+      // If workflow is already awaiting approval
       if (initRes.status === 'awaiting_approval') {
         setIsBootstrapping(false);
+        if (sseCleanup) sseCleanup();
         setApiNotification({
           type: 'info',
-          message: `Execution plan prepared (${initRes.execution_plan?.length || 0} steps). Review the commands below and approve to boot sandbox.`,
+          message: `Execution plan prepared (${initRes.execution_plan?.length || 0} steps). Review the commands in the setup timeline and approve to boot sandbox.`,
         });
         return;
       }
 
-      // 2. Poll workflow status from FastAPI backend until terminal status
+      // 2. Poll workflow status from FastAPI backend until terminal status or awaiting_approval
       const finalStatus = await sandboxApi.pollWorkflowStatus(newId, (prog) => {
         setSandboxes((prev) =>
-          prev.map((s) => {
-            if (s.id === newId) {
-              const updatedSteps = mapBackendStepsToPipeline(prog.steps, s.steps);
-              return {
-                ...s,
-                steps: updatedSteps,
-                currentStepId:
-                  updatedSteps.find((st) => st.status === 'running')?.id || s.currentStepId,
-              };
-            }
-            return s;
-          })
+          prev.map((s) => (s.id === newId ? applyWorkflowStatusToSandbox(s, prog) : s))
+        );
+        setDetailModalSandbox((curr) =>
+          curr && curr.id === newId ? applyWorkflowStatusToSandbox(curr, prog) : curr
         );
       });
+
+      if (sseCleanup) {
+        sseCleanup();
+      }
+
+      // If workflow paused at approval gate
+      if (finalStatus.status === 'awaiting_approval') {
+        setIsBootstrapping(false);
+        setApiNotification({
+          type: 'info',
+          message: `Execution plan prepared (${finalStatus.execution_plan?.length || 0} steps). Review the commands in the setup timeline and approve to boot sandbox.`,
+        });
+        return;
+      }
 
       // 3. Finalize sandbox state
       finalizeWorkflowResult(newId, finalStatus, newSandbox);
@@ -388,7 +541,7 @@ export default function App() {
 
       cancelSimulationRef.current = cancel;
       setActiveSandboxId(newId);
-      setActiveTab('overview');
+      setActiveTab('history');
     } finally {
       setIsBootstrapping(false);
     }
@@ -403,6 +556,12 @@ export default function App() {
       steps: BackendWorkflowStep[];
       approval_status?: string | null;
       rejection_reason?: string | null;
+      current_stage?: string | null;
+      current_message?: string | null;
+      progress_percentage?: number | null;
+      stages?: any[] | null;
+      execution_steps?: any[] | null;
+      verification_results?: any;
     },
     targetSandbox: Sandbox
   ) => {
@@ -437,6 +596,23 @@ export default function App() {
             status: isFailed ? 'failed' : isRejected ? 'rejected' : 'running',
             approvalStatus: (finalStatus.approval_status as any) || s.approvalStatus,
             rejectionReason: finalStatus.rejection_reason || s.rejectionReason,
+            currentStage: finalStatus.current_stage || s.currentStage || 'final_result',
+            currentMessage:
+              finalStatus.current_message ||
+              (isFailed
+                ? 'Environment verification failed.'
+                : isRejected
+                ? 'Your setup plan was rejected. No commands were executed.'
+                : 'Setup completed successfully.'),
+            progressPercentage:
+              finalStatus.progress_percentage != null
+                ? finalStatus.progress_percentage
+                : isFailed
+                ? 90
+                : 100,
+            stages: finalStatus.stages || s.stages,
+            executionSteps: finalStatus.execution_steps || s.executionSteps,
+            verificationResults: finalStatus.verification_results || s.verificationResults,
             steps: updatedSteps,
             errorSummary,
             healthStatus:
@@ -448,7 +624,8 @@ export default function App() {
                     statusCode: 200,
                     checkedAt: 'Just now',
                   },
-            previewUrl: isFailed || isRejected ? undefined : `http://localhost:${targetSandbox.env.port}`,
+            previewUrl:
+              isFailed || isRejected ? undefined : `http://localhost:${targetSandbox.env.port}`,
             logs: [
               ...s.logs,
               ...(isFailed
@@ -468,7 +645,9 @@ export default function App() {
                       timestamp: new Date().toTimeString().split(' ')[0],
                       level: 'warn' as const,
                       stepId: 'inspection' as const,
-                      message: `Workflow halted cleanly at approval gate: ${finalStatus.rejection_reason || 'Plan rejected.'}`,
+                      message: `Workflow halted cleanly at approval gate: ${
+                        finalStatus.rejection_reason || 'Plan rejected.'
+                      }`,
                     },
                   ]
                 : [
@@ -487,6 +666,40 @@ export default function App() {
       })
     );
 
+    // Keep detail modal updated if currently open
+    setDetailModalSandbox((curr) => {
+      if (curr && curr.id === sandboxId) {
+        return {
+          ...curr,
+          status: isFailed ? 'failed' : isRejected ? 'rejected' : 'running',
+          approvalStatus: (finalStatus.approval_status as any) || curr.approvalStatus,
+          rejectionReason: finalStatus.rejection_reason || curr.rejectionReason,
+          currentStage: finalStatus.current_stage || curr.currentStage || 'final_result',
+          currentMessage:
+            finalStatus.current_message ||
+            (isFailed
+              ? 'Environment verification failed.'
+              : isRejected
+              ? 'Your setup plan was rejected. No commands were executed.'
+              : 'Setup completed successfully.'),
+          progressPercentage:
+            finalStatus.progress_percentage != null
+              ? finalStatus.progress_percentage
+              : isFailed
+              ? 90
+              : 100,
+          stages: finalStatus.stages || curr.stages,
+          executionSteps: finalStatus.execution_steps || curr.executionSteps,
+          verificationResults: finalStatus.verification_results || curr.verificationResults,
+          steps: updatedSteps,
+          errorSummary,
+          previewUrl:
+            isFailed || isRejected ? undefined : `http://localhost:${targetSandbox.env.port}`,
+        };
+      }
+      return curr;
+    });
+
     setApiNotification({
       type: isFailed ? 'error' : isRejected ? 'info' : 'success',
       message: isFailed
@@ -504,24 +717,68 @@ export default function App() {
     if (!target || !target.workflowId) return;
 
     setIsBootstrapping(true);
+    let sseCleanup: (() => void) | null = null;
+
     try {
-      const apprRes = await sandboxApi.approveWorkflow(target.workflowId, {
-        approved: true,
-        plan_fingerprint: target.planFingerprint,
-      });
+      try {
+        sseCleanup = sandboxApi.subscribeWorkflowEvents(target.workflowId, (prog) => {
+          setSandboxes((prev) =>
+            prev.map((s) => (s.id === sandboxId ? applyWorkflowStatusToSandbox(s, prog) : s))
+          );
+          setDetailModalSandbox((curr) =>
+            curr && curr.id === sandboxId ? applyWorkflowStatusToSandbox(curr, prog) : curr
+          );
+        });
+      } catch (e) {
+        console.warn('SSE subscription failed, using polling', e);
+      }
+
+      const apprRes = await sandboxApi.approveWorkflow(
+        target.workflowId,
+        {
+          approved: true,
+          plan_fingerprint: target.planFingerprint,
+        },
+        { background: true }
+      );
+
+      // Record Audit
+      setAuditLogs((prev) => [
+        {
+          id: `aud-${Date.now()}`,
+          timestamp: new Date().toTimeString().split(' ')[0],
+          actor: 'developer@sandbox.dev',
+          action: 'APPROVAL_GATE_APPROVED',
+          target: `${target.id} (${target.repoName})`,
+          status: 'success',
+          details: `Plan approved. Fingerprint: ${target.planFingerprint}`,
+        },
+        ...prev,
+      ]);
+
+      // Update access request status to approved
+      setAccessRequests((prev) =>
+        prev.map((r) =>
+          r.workflowId === target.workflowId || r.sandboxId === sandboxId
+            ? {
+                ...r,
+                status: 'approved',
+                decidedAt: 'Just now',
+                decidedBy: 'Operator Approval Gate',
+              }
+            : r
+        )
+      );
 
       // Update sandbox state after resuming
       setSandboxes((prev) =>
         prev.map((s) => {
           if (s.id === sandboxId) {
-            const updatedSteps = mapBackendStepsToPipeline(apprRes.steps, s.steps);
+            const updated = applyWorkflowStatusToSandbox(s, apprRes);
             return {
-              ...s,
-              status: apprRes.status === 'completed' ? 'running' : (apprRes.status as SandboxStatus),
-              approvalStatus: 'approved',
-              steps: updatedSteps,
+              ...updated,
               logs: [
-                ...s.logs,
+                ...updated.logs,
                 {
                   id: `log-${Date.now()}-appr`,
                   timestamp: new Date().toTimeString().split(' ')[0],
@@ -536,32 +793,31 @@ export default function App() {
         })
       );
 
+      setDetailModalSandbox((curr) =>
+        curr && curr.id === sandboxId ? applyWorkflowStatusToSandbox(curr, apprRes) : curr
+      );
+
       // If already finished in synchronous execution
       if (apprRes.status === 'completed' || apprRes.status === 'failed') {
+        if (sseCleanup) sseCleanup();
         finalizeWorkflowResult(sandboxId, apprRes, target);
         return;
       }
 
-      // Poll until completed or failed
+      // Poll until completed, failed, or rejected
       const finalStatus = await sandboxApi.pollWorkflowStatus(target.workflowId, (prog) => {
         setSandboxes((prev) =>
-          prev.map((s) => {
-            if (s.id === sandboxId) {
-              const updatedSteps = mapBackendStepsToPipeline(prog.steps, s.steps);
-              return {
-                ...s,
-                steps: updatedSteps,
-                currentStepId:
-                  updatedSteps.find((st) => st.status === 'running')?.id || s.currentStepId,
-              };
-            }
-            return s;
-          })
+          prev.map((s) => (s.id === sandboxId ? applyWorkflowStatusToSandbox(s, prog) : s))
+        );
+        setDetailModalSandbox((curr) =>
+          curr && curr.id === sandboxId ? applyWorkflowStatusToSandbox(curr, prog) : curr
         );
       });
 
+      if (sseCleanup) sseCleanup();
       finalizeWorkflowResult(sandboxId, finalStatus, target);
     } catch (err: unknown) {
+      if (sseCleanup) sseCleanup();
       setApiNotification({
         type: 'error',
         message: `Approval failed: ${(err as Error)?.message || 'Unknown error'}`,
@@ -582,6 +838,42 @@ export default function App() {
         target.workflowId,
         reason || 'User rejected execution plan.',
         target.planFingerprint
+      );
+
+      // Record Audit
+      setAuditLogs((prev) => [
+        {
+          id: `aud-${Date.now()}`,
+          timestamp: new Date().toTimeString().split(' ')[0],
+          actor: 'developer@sandbox.dev',
+          action: 'APPROVAL_GATE_REJECTED',
+          target: `${target.id} (${target.repoName})`,
+          status: 'warning',
+          details: `Execution plan rejected: ${reason || 'User rejected execution plan.'}`,
+        },
+        ...prev,
+      ]);
+
+      // Update access request status to rejected
+      setAccessRequests((prev) =>
+        prev.map((r) =>
+          r.workflowId === target.workflowId || r.sandboxId === sandboxId
+            ? {
+                ...r,
+                status: 'rejected',
+                decidedAt: 'Just now',
+                decidedBy: 'Operator Approval Gate',
+              }
+            : r
+        )
+      );
+
+      setSandboxes((prev) =>
+        prev.map((s) => (s.id === sandboxId ? applyWorkflowStatusToSandbox(s, rejRes) : s))
+      );
+
+      setDetailModalSandbox((curr) =>
+        curr && curr.id === sandboxId ? applyWorkflowStatusToSandbox(curr, rejRes) : curr
       );
 
       finalizeWorkflowResult(sandboxId, rejRes, target);
@@ -618,6 +910,8 @@ export default function App() {
       startCommand: targetSandbox.env.startCommand,
       testCommand: targetSandbox.env.testCommand,
       envVars,
+      requestedScope: targetSandbox.requestedScope || 'sandbox_debug',
+      accessReason: targetSandbox.accessReason || 'Re-run execution',
       simulateFailure: withSuggestedFix ? false : targetSandbox.status === 'failed',
     });
   };
@@ -640,6 +934,111 @@ export default function App() {
     }
   };
 
+  // Admin Request Handlers: Direct connection to LangGraph Workflow
+  const handleApproveAccessRequest = async (
+    requestId: string,
+    workflowId?: string,
+    fingerprint?: string
+  ) => {
+    // 1. Update access request status
+    setAccessRequests((prev) =>
+      prev.map((r) =>
+        r.id === requestId
+          ? {
+              ...r,
+              status: 'approved',
+              decidedAt: 'Just now',
+              decidedBy: 'admin@sandbox.internal',
+            }
+          : r
+      )
+    );
+
+    // 2. Resume real LangGraph workflow
+    const matchingSandbox = sandboxes.find(
+      (s) => s.workflowId === workflowId || s.id === workflowId
+    );
+
+    if (matchingSandbox) {
+      await handleApprovePlan(matchingSandbox.id);
+    } else if (workflowId) {
+      try {
+        await sandboxApi.approveWorkflow(workflowId, {
+          approved: true,
+          plan_fingerprint: fingerprint,
+        });
+      } catch (e) {
+        console.warn('Backend approval call error:', e);
+      }
+    }
+
+    setAuditLogs((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        timestamp: new Date().toTimeString().split(' ')[0],
+        actor: 'admin@sandbox.internal',
+        action: 'ACCESS_REQUEST_APPROVED',
+        target: requestId,
+        status: 'success',
+        details: `Access request ${requestId} approved by cluster administrator. LangGraph checkpoint resumed.`,
+      },
+      ...prev,
+    ]);
+  };
+
+  const handleRejectAccessRequest = async (
+    requestId: string,
+    workflowId?: string,
+    reason?: string
+  ) => {
+    // 1. Update access request status
+    setAccessRequests((prev) =>
+      prev.map((r) =>
+        r.id === requestId
+          ? {
+              ...r,
+              status: 'rejected',
+              decidedAt: 'Just now',
+              decidedBy: 'admin@sandbox.internal',
+            }
+          : r
+      )
+    );
+
+    // 2. Reject real LangGraph workflow
+    const matchingSandbox = sandboxes.find(
+      (s) => s.workflowId === workflowId || s.id === workflowId
+    );
+
+    if (matchingSandbox) {
+      await handleRejectPlan(matchingSandbox.id, reason);
+    } else if (workflowId) {
+      try {
+        await sandboxApi.rejectWorkflow(
+          workflowId,
+          reason || 'Security policy rejection by cluster admin.'
+        );
+      } catch (e) {
+        console.warn('Backend rejection call error:', e);
+      }
+    }
+
+    setAuditLogs((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        timestamp: new Date().toTimeString().split(' ')[0],
+        actor: 'admin@sandbox.internal',
+        action: 'ACCESS_REQUEST_REJECTED',
+        target: requestId,
+        status: 'warning',
+        details: `Access request ${requestId} rejected by cluster admin. Reason: ${
+          reason || 'Security policy rejection'
+        }.`,
+      },
+      ...prev,
+    ]);
+  };
+
   // Filter click on KPI card
   const handleKpiFilterClick = (status: 'all' | 'running' | 'failed' | 'success') => {
     setHistoryFilter(status);
@@ -647,11 +1046,13 @@ export default function App() {
   };
 
   const runningCount = sandboxes.filter((s) => s.status === 'running').length;
+  const pendingRequestsCount = accessRequests.filter((r) => r.status === 'pending').length;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#0c0e14] text-neutral-100 font-sans">
-      {/* 2. Left Sidebar Branded "Sandbox Bootstrapper" */}
+      {/* 2. Expandable / Collapsible Sidebar */}
       <Sidebar
+        role={userRole}
         activeTab={activeTab}
         onSelectTab={(tab) => {
           setActiveTab(tab);
@@ -660,16 +1061,22 @@ export default function App() {
           }
         }}
         activeSandboxesCount={runningCount}
+        pendingRequestsCount={pendingRequestsCount}
+        collapsed={isSidebarCollapsed}
+        onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+        onSwitchRole={handleSwitchRole}
       />
 
       {/* Main Content Viewport */}
       <div className="flex-1 flex flex-col h-screen min-w-0 overflow-y-auto">
-        {/* 3. Main Header with Breadcrumb, Cluster Status, and Create Sandbox CTA */}
+        {/* 3. Main Header with Breadcrumb, Cluster Status, and Role Switcher */}
         <Header
+          role={userRole}
           activeTab={activeTab}
           backendHealth={backendHealth}
           isRefreshing={isRefreshing}
           onRefresh={handleRefresh}
+          onOpenRoleModal={() => setIsDemoLoginModalOpen(true)}
         />
 
         {/* API Notification Banner */}
@@ -704,249 +1111,30 @@ export default function App() {
 
         {/* Dynamic Page Views */}
         <main className="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
-          {/* TAB 1: OVERVIEW */}
-          {activeTab === 'overview' && (
-            <div className="space-y-6">
-              {/* 4. Four Summary KPI Cards */}
-              <OverviewCards
-                sandboxes={sandboxes}
-                onFilterClick={handleKpiFilterClick}
-              />
-
-              {activeSandbox ? (
-                <div className="space-y-5">
-                  {/* 5. Repository Summary Row */}
-                  <div className="flex flex-wrap items-center justify-between gap-3 bg-[#11141c] border border-neutral-800 rounded-lg px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 rounded bg-neutral-900 border border-neutral-800 text-neutral-300">
-                        <Github className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-semibold text-xs text-neutral-200">
-                            {activeSandbox.repoOwner}/{activeSandbox.repoName}
-                          </span>
-                          <span className="text-neutral-600">·</span>
-                          <span className="font-mono text-xs text-neutral-400">
-                            {activeSandbox.branch}
-                          </span>
-                          <span className="text-neutral-600">·</span>
-                          <span className="text-neutral-400 text-xs font-mono">
-                            {activeSandbox.id}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-neutral-400 mt-0.5">
-                          {activeSandbox.runtimeVersion} · {activeSandbox.packageManager} · Created {activeSandbox.createdAt}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={activeSandbox.id}
-                        onChange={(e) => setActiveSandboxId(e.target.value)}
-                        className="px-2.5 py-1.5 bg-[#0c0e14] border border-neutral-800 rounded text-xs text-neutral-300 focus:outline-none"
-                      >
-                        {sandboxes.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.repoName} ({s.id}) - {s.status.toUpperCase()}
-                          </option>
-                        ))}
-                      </select>
-
-                      <button
-                        onClick={() => setDetailModalSandbox(activeSandbox)}
-                        className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium transition-colors"
-                      >
-                        Inspect Details
-                      </button>
-
-                      <button
-                        onClick={() => handleRetrySandbox(activeSandbox)}
-                        disabled={isBootstrapping}
-                        className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium transition-colors flex items-center gap-1.5"
-                      >
-                        <RotateCcw className={`w-3 h-3 ${isBootstrapping ? 'animate-spin' : ''}`} />
-                        <span>Re-run</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Execution Plan Approval Gate Card */}
-                  {activeSandbox.status === 'awaiting_approval' && (
-                    <div className="bg-[#11141c] border-2 border-violet-500/50 rounded-xl p-5 sm:p-6 shadow-[0_0_30px_rgba(139,92,246,0.15)] space-y-4">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-neutral-800">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 rounded-lg bg-violet-500/20 border border-violet-500/40 text-violet-300">
-                            <ShieldCheck className="w-5 h-5" />
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <h3 className="text-sm font-bold text-neutral-100 tracking-tight">
-                                Action Required: Review & Approve Execution Plan
-                              </h3>
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold uppercase bg-violet-500/20 text-violet-300 border border-violet-500/30">
-                                Approval Gate
-                              </span>
-                            </div>
-                            <p className="text-xs text-neutral-400 mt-0.5">
-                              The agent analyzed the setup manifest and prepared the execution steps below. No commands run until you approve.
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => handleRejectPlan(activeSandbox.id)}
-                            disabled={isBootstrapping}
-                            className="px-3.5 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/50 border border-rose-700/50 text-rose-300 text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                          >
-                            <XCircle className="w-3.5 h-3.5" />
-                            <span>Reject Plan</span>
-                          </button>
-
-                          <button
-                            onClick={() => handleApprovePlan(activeSandbox.id)}
-                            disabled={isBootstrapping}
-                            className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-950/50 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                          >
-                            {isBootstrapping ? (
-                              <RotateCcw className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                            )}
-                            <span>Approve Plan & Boot Sandbox</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Plan Fingerprint & Sandbox Isolation Notice */}
-                      <div className="flex flex-wrap items-center justify-between text-xs text-neutral-400 bg-[#0c0e14] px-3.5 py-2 rounded-lg border border-neutral-800/80 gap-2 font-mono">
-                        <div className="flex items-center gap-2">
-                          <span className="text-neutral-500">Plan Fingerprint:</span>
-                          <span className="text-violet-300 select-all">
-                            {activeSandbox.planFingerprint || 'sha256:pending'}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-emerald-400 text-[11px]">
-                          <ShieldCheck className="w-3.5 h-3.5" />
-                          <span>Restricted Sandbox Executor Isolation</span>
-                        </div>
-                      </div>
-
-                      {/* Steps List */}
-                      <div className="space-y-2">
-                        <div className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
-                          Proposed Commands ({activeSandbox.proposedPlan?.length || 0} steps)
-                        </div>
-                        <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                          {activeSandbox.proposedPlan && activeSandbox.proposedPlan.length > 0 ? (
-                            activeSandbox.proposedPlan.map((step) => (
-                              <div
-                                key={step.step}
-                                className="flex items-start justify-between gap-3 p-2.5 rounded-lg bg-[#0e1118] border border-neutral-800 text-xs"
-                              >
-                                <div className="flex items-start gap-2.5 min-w-0">
-                                  <span className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-300 font-mono text-[11px] shrink-0">
-                                    #{step.step}
-                                  </span>
-                                  <div className="min-w-0">
-                                    <div className="font-mono text-neutral-200 text-xs truncate">
-                                      $ {step.command}
-                                    </div>
-                                    <div className="text-[11px] text-neutral-400 mt-0.5">
-                                      {step.description}
-                                    </div>
-                                  </div>
-                                </div>
-                                <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-neutral-800/80 text-neutral-400 shrink-0">
-                                  {step.phase}
-                                </span>
-                              </div>
-                            ))
-                          ) : (
-                            <div className="p-3 text-xs text-neutral-500 font-mono italic text-center">
-                              Standard setup commands configured from manifest.
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Rejection notice if status is rejected */}
-                  {activeSandbox.status === 'rejected' && (
-                    <div className="bg-rose-950/20 border border-rose-500/40 rounded-xl p-4 flex items-center justify-between gap-3 text-xs">
-                      <div className="flex items-center gap-3">
-                        <div className="p-2 rounded bg-rose-500/20 text-rose-300 shrink-0">
-                          <XCircle className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <div className="font-semibold text-rose-300">Execution Plan Rejected</div>
-                          <div className="text-neutral-400 text-[11px] mt-0.5">
-                            {activeSandbox.rejectionReason || 'Execution was halted at the approval gate without running commands.'}
-                          </div>
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => handleRetrySandbox(activeSandbox)}
-                        className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium transition-colors shrink-0"
-                      >
-                        Re-plan Setup
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Environment Details (~45%) & Activity Console (~55%) */}
-                  <div className="flex flex-col lg:flex-row gap-6 items-stretch">
-                    {/* Environment Details Panel (approx. 45% width) */}
-                    <div className="w-full lg:w-[45%] flex flex-col">
-                      <EnvironmentDetails
-                        env={activeSandbox.env}
-                        status={activeSandbox.status}
-                        repoName={activeSandbox.repoName}
-                        branch={activeSandbox.branch}
-                        healthStatus={activeSandbox.healthStatus}
-                        previewUrl={activeSandbox.previewUrl}
-                        onOpenPreview={() => setPreviewModalSandbox(activeSandbox)}
-                        onRestart={() => handleRetrySandbox(activeSandbox)}
-                        onViewDiagnostics={() => setDetailModalSandbox(activeSandbox)}
-                        isRetrying={isBootstrapping}
-                      />
-                    </div>
-
-                    {/* Activity Console Panel (approx. 55% width) */}
-                    <div className="w-full lg:w-[55%] flex flex-col">
-                      <ActivityPanel
-                        logs={activeSandbox.logs}
-                        activeStepFilter={selectedWorkflowStep}
-                        isRunning={isBootstrapping}
-                      />
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-12 text-center rounded-lg bg-[#11141c] border border-neutral-800 space-y-4">
-                  <Terminal className="w-10 h-10 mx-auto text-neutral-500" />
-                  <h3 className="text-sm font-semibold text-neutral-200">
-                    No Active Sandbox
-                  </h3>
-                  <p className="text-xs text-neutral-400 max-w-md mx-auto">
-                    Connect a repository to automatically parse dependencies, launch an isolated environment, and verify health checks.
-                  </p>
-                  <button
-                    onClick={() => setActiveTab('new-sandbox')}
-                    className="px-4 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded text-xs font-semibold cursor-pointer transition-colors shadow-sm shadow-violet-950/40"
-                  >
-                    Create Your First Sandbox
-                  </button>
-                </div>
-              )}
-            </div>
+          {/* ========================================================= */}
+          {/* TAB: DEVELOPER OVERVIEW (CLEAN, FOCUSED, SCANNABLE)       */}
+          {/* ========================================================= */}
+          {userRole === 'developer' && activeTab === 'overview' && (
+            <DeveloperOverview
+              sandboxes={sandboxes}
+              activeSandbox={activeSandbox}
+              onSelectSandbox={(sbx) => setDetailModalSandbox(sbx)}
+              onCreateSandbox={() => setActiveTab('new-sandbox')}
+              onOpenPreview={(sbx) => setPreviewModalSandbox(sbx)}
+              onRetrySandbox={(sbx) => handleRetrySandbox(sbx)}
+              onStopSandbox={handleStopSandbox}
+              onViewAllHistory={() => {
+                setHistoryFilter('all');
+                setActiveTab('history');
+              }}
+              isRetrying={isBootstrapping}
+            />
           )}
 
-          {/* TAB 2: NEW SANDBOX */}
-          {activeTab === 'new-sandbox' && (
+          {/* ========================================================= */}
+          {/* TAB: NEW SANDBOX PAGE                                     */}
+          {/* ========================================================= */}
+          {userRole === 'developer' && activeTab === 'new-sandbox' && (
             <div className="max-w-4xl space-y-4">
               <div>
                 <h2 className="text-base font-bold text-neutral-100">
@@ -964,8 +1152,10 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 3: SANDBOX HISTORY */}
-          {activeTab === 'history' && (
+          {/* ========================================================= */}
+          {/* TAB: SANDBOX HISTORY                                      */}
+          {/* ========================================================= */}
+          {userRole === 'developer' && activeTab === 'history' && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
@@ -978,7 +1168,7 @@ export default function App() {
                 </div>
                 <button
                   onClick={() => setActiveTab('new-sandbox')}
-                  className="px-3.5 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold rounded-md transition-colors cursor-pointer shadow-sm shadow-violet-950/40"
+                  className="px-3.5 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer shadow-sm shadow-violet-950/40"
                 >
                   New Sandbox
                 </button>
@@ -996,8 +1186,17 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 4: SETTINGS */}
-          {activeTab === 'settings' && (
+          {/* ========================================================= */}
+          {/* TAB: SUPPORTED RUNTIMES                                   */}
+          {/* ========================================================= */}
+          {userRole === 'developer' && activeTab === 'runtimes' && (
+            <SupportedRuntimesView />
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: SETTINGS                                             */}
+          {/* ========================================================= */}
+          {userRole === 'developer' && activeTab === 'settings' && (
             <div className="space-y-4">
               <div>
                 <h2 className="text-base font-bold text-neutral-100">
@@ -1011,10 +1210,28 @@ export default function App() {
               <SettingsView />
             </div>
           )}
+
+          {/* ========================================================= */}
+          {/* ADMINISTRATOR WORKSPACE PAGES                             */}
+          {/* ========================================================= */}
+          {userRole === 'admin' && (
+            <AdminWorkspace
+              activeTab={activeTab as AdminNavTab}
+              sandboxes={sandboxes}
+              accessRequests={accessRequests}
+              onApproveRequest={handleApproveAccessRequest}
+              onRejectRequest={handleRejectAccessRequest}
+              developers={developers}
+              auditLogs={auditLogs}
+              onSelectSandbox={(sbx) => setDetailModalSandbox(sbx)}
+              onStopSandbox={handleStopSandbox}
+              onNavigateTab={(tab) => setActiveTab(tab)}
+            />
+          )}
         </main>
       </div>
 
-      {/* MODAL 1: DETAILED SANDBOX INSPECTION */}
+      {/* MODAL 1: DETAILED SANDBOX INSPECTION (WITH SETUP TIMELINE & APPROVAL ACTIONS) */}
       {detailModalSandbox && (
         <DetailedSandboxModal
           sandbox={detailModalSandbox}
@@ -1025,6 +1242,9 @@ export default function App() {
             setDetailModalSandbox(null);
             setPreviewModalSandbox(sbx);
           }}
+          onApprove={(sbx) => handleApprovePlan(sbx.id)}
+          onReject={(sbx, reason) => handleRejectPlan(sbx.id, reason)}
+          isApproving={isBootstrapping}
         />
       )}
 
@@ -1035,6 +1255,14 @@ export default function App() {
           onClose={() => setPreviewModalSandbox(null)}
         />
       )}
+
+      {/* MODAL 3: DEMO LOGIN / ROLE SWITCHER */}
+      <DemoLoginModal
+        isOpen={isDemoLoginModalOpen}
+        onClose={() => setIsDemoLoginModalOpen(false)}
+        currentRole={userRole}
+        onSelectRole={handleSwitchRole}
+      />
     </div>
   );
 }

@@ -4,6 +4,8 @@
  * Base URL defaults to http://127.0.0.1:8000 (configurable via VITE_API_BASE_URL).
  */
 
+import { WorkflowStageInfo } from '../types/sandbox';
+
 export type BackendProjectType =
   | 'node_app'
   | 'python_app'
@@ -137,6 +139,12 @@ export interface WorkflowCreateResponse {
   approval_status?: BackendApprovalStatus | null;
   plan_fingerprint?: string | null;
   execution_plan?: PlannedStep[] | null;
+  current_stage?: string | null;
+  current_message?: string | null;
+  progress_percentage?: number | null;
+  completed_stages?: string[] | null;
+  stages?: WorkflowStageInfo[] | null;
+  approval_required?: boolean | null;
 }
 
 export interface WorkflowManifestSummary {
@@ -164,6 +172,27 @@ export interface WorkflowStatusResponse {
   execution_plan?: PlannedStep[] | null;
   approved_at?: string | null;
   rejection_reason?: string | null;
+  current_stage?: string | null;
+  current_message?: string | null;
+  progress_percentage?: number | null;
+  completed_stages?: string[] | null;
+  stages?: WorkflowStageInfo[] | null;
+  approval_required?: boolean | null;
+  execution_steps?: Array<{
+    command: string;
+    exit_code: number;
+    stdout: string;
+    stderr: string;
+    duration_seconds: number;
+    success: boolean;
+  }> | null;
+  verification_results?: {
+    port: number;
+    status_code: number;
+    latency_ms: number;
+    healthy: boolean;
+    checks: string[];
+  } | null;
 }
 
 export interface APIErrorResponse {
@@ -306,8 +335,12 @@ export const sandboxApi = {
    * Initialize simulated sandbox setup workflow
    * POST /api/v1/sandbox/setup
    */
-  async createSandboxSetup(payload: SetupManifestPayload): Promise<WorkflowCreateResponse> {
-    return request<WorkflowCreateResponse>(`${API_V1_PREFIX}/sandbox/setup`, {
+  async createSandboxSetup(
+    payload: SetupManifestPayload,
+    options?: { background?: boolean }
+  ): Promise<WorkflowCreateResponse> {
+    const q = options?.background ? '?background=true' : '';
+    return request<WorkflowCreateResponse>(`${API_V1_PREFIX}/sandbox/setup${q}`, {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -335,12 +368,17 @@ export const sandboxApi = {
    */
   async approveWorkflow(
     workflowId: string,
-    decision?: ApprovalDecisionRequest
+    decision?: ApprovalDecisionRequest,
+    options?: { background?: boolean }
   ): Promise<WorkflowStatusResponse> {
-    return request<WorkflowStatusResponse>(`${API_V1_PREFIX}/sandbox/${encodeURIComponent(workflowId)}/approve`, {
-      method: 'POST',
-      body: JSON.stringify(decision || { approved: true }),
-    });
+    const q = options?.background ? '?background=true' : '';
+    return request<WorkflowStatusResponse>(
+      `${API_V1_PREFIX}/sandbox/${encodeURIComponent(workflowId)}/approve${q}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(decision || { approved: true }),
+      }
+    );
   },
 
   /**
@@ -360,6 +398,60 @@ export const sandboxApi = {
         plan_fingerprint: planFingerprint,
       }),
     });
+  },
+
+  /**
+   * Subscribe to real-time Server-Sent Events (SSE) stream for live workflow progress
+   */
+  subscribeWorkflowEvents(
+    workflowId: string,
+    onUpdate: (status: WorkflowStatusResponse) => void,
+    onComplete?: () => void,
+    onError?: (err: Event) => void
+  ): () => void {
+    const streamUrl = `${BACKEND_BASE_URL}${API_V1_PREFIX}/sandbox/${encodeURIComponent(workflowId)}/events`;
+    let eventSource: EventSource | null = null;
+    let isClosed = false;
+
+    try {
+      eventSource = new EventSource(streamUrl);
+
+      eventSource.addEventListener('status', (e: MessageEvent) => {
+        try {
+          const parsed = JSON.parse(e.data) as WorkflowStatusResponse;
+          onUpdate(parsed);
+        } catch {}
+      });
+
+      eventSource.addEventListener('update', (e: MessageEvent) => {
+        try {
+          const parsed = JSON.parse(e.data) as WorkflowStatusResponse;
+          onUpdate(parsed);
+        } catch {}
+      });
+
+      eventSource.addEventListener('complete', () => {
+        if (eventSource && !isClosed) {
+          eventSource.close();
+          isClosed = true;
+        }
+        if (onComplete) onComplete();
+      });
+
+      eventSource.onerror = (err) => {
+        if (onError) onError(err);
+      };
+    } catch (err) {
+      if (onError) onError(err as unknown as Event);
+    }
+
+    return () => {
+      isClosed = true;
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    };
   },
 
   /**

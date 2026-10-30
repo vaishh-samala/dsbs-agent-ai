@@ -6,6 +6,37 @@ export type SandboxStatus = 'queued' | 'running' | 'awaiting_approval' | 'reject
 
 export type ApprovalStatus = 'awaiting_approval' | 'approved' | 'rejected';
 
+export type StageId =
+  | 'inspection'
+  | 'planning'
+  | 'approval'
+  | 'execution'
+  | 'verification'
+  | 'final_result';
+
+export type StageStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting_for_approval'
+  | 'completed'
+  | 'rejected'
+  | 'failed'
+  | 'skipped';
+
+export interface WorkflowStageInfo {
+  id: string;
+  number: number;
+  title: string;
+  description: string;
+  status: StageStatus;
+  message?: string;
+  started_at?: string;
+  completed_at?: string;
+  duration_seconds?: number;
+  error_message?: string;
+  details?: Record<string, unknown>;
+}
+
 export interface PlannedExecutionStep {
   step: number;
   phase: string;
@@ -68,6 +99,56 @@ export interface HealthStatus {
   checkedAt: string;
 }
 
+export type AccessScope = 'read_only' | 'sandbox_debug' | 'full_ports';
+
+export interface AccessRequest {
+  id: string;
+  workflowId?: string;
+  sandboxId?: string;
+  repoUrl: string;
+  repoName: string;
+  branch: string;
+  runtime?: RuntimeType;
+  runtimeVersion?: string;
+  packageManager?: PackageManager;
+  developerName: string;
+  developerEmail: string;
+  scope: AccessScope;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  requestedAt: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  proposedPlan?: PlannedExecutionStep[];
+  planFingerprint?: string;
+  manifestFileName?: string;
+  dependencies?: string[];
+  startCommand?: string;
+  testCommand?: string;
+  warnings?: string[];
+}
+
+export interface DeveloperUser {
+  id: string;
+  name: string;
+  email: string;
+  role: 'developer' | 'admin' | 'lead';
+  activeSandboxes: number;
+  totalRuns: number;
+  lastActive: string;
+  status: 'active' | 'idle' | 'suspended';
+}
+
+export interface AuditActivityEvent {
+  id: string;
+  timestamp: string;
+  actor: string;
+  action: string;
+  target: string;
+  status: 'success' | 'warning' | 'error' | 'info';
+  details: string;
+}
+
 export interface Sandbox {
   id: string;
   name: string;
@@ -95,6 +176,46 @@ export interface Sandbox {
   proposedPlan?: PlannedExecutionStep[];
   approvedAt?: string;
   rejectionReason?: string;
+  currentStage?: string;
+  currentMessage?: string;
+  progressPercentage?: number;
+  completedStages?: string[];
+  stages?: WorkflowStageInfo[];
+  approvalRequired?: boolean;
+  requestedScope?: AccessScope;
+  accessReason?: string;
+  executionSteps?: Array<{
+    command: string;
+    exit_code: number;
+    stdout: string;
+    stderr: string;
+    duration_seconds: number;
+    success: boolean;
+  }>;
+  verificationResults?: {
+    port: number;
+    status_code: number;
+    latency_ms: number;
+    healthy: boolean;
+    checks: string[];
+  };
 }
 
-export type ActiveNavTab = 'overview' | 'new-sandbox' | 'history' | 'settings';
+export type UserRole = 'developer' | 'admin';
+
+export type ActiveNavTab =
+  | 'overview'
+  | 'new-sandbox'
+  | 'history'
+  | 'runtimes'
+  | 'settings';
+
+export type AdminNavTab =
+  | 'admin-overview'
+  | 'admin-sandboxes'
+  | 'admin-requests'
+  | 'admin-developers'
+  | 'admin-monitoring'
+  | 'admin-audit'
+  | 'admin-settings';
+

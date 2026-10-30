@@ -64,7 +64,7 @@ async def create_sandbox_setup(payload: Dict[str, Any], background: bool = False
     validation = ManifestService.validate_manifest_data(payload)
     if not validation.is_valid or validation.normalized_manifest is None:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", status.HTTP_422_UNPROCESSABLE_ENTITY),
             content=APIErrorResponse(
                 detail="Manifest validation failed. Correct the listed field errors before initiating setup.",
                 error_code="MANIFEST_VALIDATION_FAILED",

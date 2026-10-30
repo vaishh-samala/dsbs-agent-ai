@@ -1,5 +1,13 @@
 """FastAPI application entry point for Developer Sandbox Bootstrapper."""
 
+import sys
+from pathlib import Path
+
+# Ensure backend root is always on sys.path so 'app.*' imports resolve cleanly
+_backend_dir = Path(__file__).resolve().parent.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -70,7 +78,7 @@ def create_application() -> FastAPI:
             for err in exc.errors()
         ]
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", status.HTTP_422_UNPROCESSABLE_ENTITY),
             content=APIErrorResponse(
                 detail="Request body validation failed.",
                 error_code="REQUEST_VALIDATION_ERROR",
@@ -92,4 +100,4 @@ app = create_application()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True, app_dir=str(_backend_dir))
